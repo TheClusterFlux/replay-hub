@@ -1,0 +1,15 @@
+name: Deploy to Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    uses: TheClusterFlux/central-workflows/.github/workflows/DockerBuildAndK8Deploy.yaml@main
+    secrets: 
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      KUBECONFIG: ${{ secrets.KUBECONFIG }}
+    
