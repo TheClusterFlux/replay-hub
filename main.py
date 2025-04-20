@@ -5,9 +5,11 @@ from pymongo import MongoClient
 MONGO_SERVICE_NAME = os.getenv("MONGO_SERVICE_NAME", "mongodb")
 MONGO_NAMESPACE = os.getenv("MONGO_NAMESPACE", "default")
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
+MONGO_USERNAME = os.getenv("MONGO_USERNAME", "root")  # Default MongoDB root username
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")  # Password from Kubernetes secret
 
-# Construct the MongoDB connection string
-mongo_uri = f"mongodb://{MONGO_SERVICE_NAME}.{MONGO_NAMESPACE}.svc.cluster.local:{MONGO_PORT}"
+# Construct the MongoDB connection string with authentication
+mongo_uri = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_SERVICE_NAME}.{MONGO_NAMESPACE}.svc.cluster.local:{MONGO_PORT}"
 
 # Connect to MongoDB
 client = MongoClient(mongo_uri)

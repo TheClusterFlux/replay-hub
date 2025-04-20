@@ -16,6 +16,12 @@ spec:
         - name: replay-hub
           image: docker.io/keanuwatts/theclusterflux:replay-hub
           imagePullPolicy: Always
+          env:
+          - name: MONGO_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mongodb 
+                key: mongodb-root-password
       imagePullSecrets:
         - name: dockerhub-secret
 ---
