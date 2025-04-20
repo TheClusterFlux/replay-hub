@@ -2,7 +2,7 @@ import os
 from pymongo import MongoClient
 
 # Get MongoDB connection details from environment variables
-MONGO_SERVICE_NAME = os.getenv("MONGO_SERVICE_NAME", "my-mongo-mongodb")
+MONGO_SERVICE_NAME = os.getenv("MONGO_SERVICE_NAME", "mongodb")
 MONGO_NAMESPACE = os.getenv("MONGO_NAMESPACE", "default")
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 
