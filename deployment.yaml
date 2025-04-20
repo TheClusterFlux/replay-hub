@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: replay-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: replay-hub
+  template:
+    metadata:
+      labels:
+        app: replay-hub
+    spec:
+      containers:
+        - name: replay-hub
+          image: docker.io/keanuwatts/theclusterflux:replay-hub
+          imagePullPolicy: Always
+      imagePullSecrets:
+        - name: dockerhub-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: replay-hub
+spec:
+  selector:
+    app: replay-hub
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
