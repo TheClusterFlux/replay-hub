@@ -3,4 +3,3 @@ pymongo
 moviepy
 flask-cors
 requests
-gunicorn
