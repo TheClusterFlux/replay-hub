@@ -31,3 +31,10 @@ def fetch_from_db(query):
     data = list(collection.find(query, {"_id": 0}))  # Exclude the MongoDB `_id` field
     logger.info(f"Fetched data: {data}")
     return data
+
+def delete_from_db(filters):
+    """Delete data from MongoDB based on filters."""
+    logger.info(f"Deleting data with filters: {filters}")
+    result = collection.delete_many(filters)
+    logger.info(f"Deleted {result.deleted_count} documents from the collection")
+    return result.deleted_count

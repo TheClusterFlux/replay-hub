@@ -3,42 +3,16 @@ import threading
 from flask import request, jsonify
 from bson.objectid import ObjectId
 from app import app, logger
-from app.database import save_to_db, fetch_from_db, fs
+from app.database import save_to_db, fetch_from_db, fs, delete_from_db
 from app.utils import extract_video_metadata, schedule_delete
 from app.config import UPLOAD_FOLDER
 import uuid
+import requests  
 
 # Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """Upload and save a video file."""
-    try:
-        # Validate and process the uploaded file
-        file, file_path, internal_name, save_to_s3 = process_upload_request()
-        
-        s3_url = handle_file_storage(file, file_path, save_to_s3)
-
-        video_metadata = extract_video_metadata(file_path)
-
-        thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
-
-        combined_metadata = combine_and_save_metadata(
-            video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
-        )
-
-        return jsonify({
-            "message": "File uploaded successfully",
-            "file_path": file_path if not s3_url else None,
-            "s3_url": s3_url,
-            "metadata": combined_metadata,
-            "metadata_id": combined_metadata["_id"]
-        }), 201
-    except Exception as e:
-        logger.error(f"Error uploading file: {e}")
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/thumbnail/<thumbnail_id>', methods=['GET'])
 def get_thumbnail(thumbnail_id):
@@ -56,12 +30,64 @@ def get_metadata():
     try:
         filters = request.args.to_dict()
         metadata = fetch_from_db(filters)
-        return jsonify({"metadata": metadata}), 200
+        return jsonify(metadata), 200
     except Exception as e:
         logger.error(f"Error fetching metadata: {e}")
         return jsonify({"error": str(e)}), 500
     
-    
+
+@app.route('/metadata', methods=['DELETE'])
+def delete_metadata():
+    """Delete metadata from MongoDB with optional filters."""
+    try:
+        filters = request.args.to_dict()
+        deleted_count = delete_from_db(filters)
+        return jsonify({"message": f"Deleted {deleted_count} documents"}), 200
+    except Exception as e:
+        logger.error(f"Error deleting metadata: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """Upload and save a video file."""
+    try:
+        # Check if a URL is provided
+        if 'url' in request.form:
+            file_path, internal_name = process_url_request(request.form['url'])
+            save_to_s3 = False  # URL-based uploads are always saved locally
+            file = None  # No file object for URL-based uploads
+        else:
+            # Validate and process the uploaded file
+            file, file_path, internal_name, save_to_s3 = process_upload_request()
+
+        # Handle S3 or local saving
+        s3_url = handle_file_storage(file, file_path, save_to_s3)
+
+        # Extract video metadata
+        video_metadata = extract_video_metadata(file_path)
+
+        # Save the thumbnail to GridFS and delete it locally
+        thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
+
+        # Combine metadata and save to MongoDB
+        combined_metadata = combine_and_save_metadata(
+            video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
+        )
+
+        return jsonify({
+            "message": "File uploaded successfully",
+            "file_path": file_path if not s3_url else None,
+            "s3_url": s3_url,
+            "metadata": combined_metadata,
+            "metadata_id": combined_metadata["_id"]
+        }), 201
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        # Ensure the file is closed if it was opened
+        if 'file' in locals() and file:
+            file.close()
     
 def process_upload_request():
     """Validate and process the uploaded file."""
@@ -88,7 +114,9 @@ def handle_file_storage(file, file_path, save_to_s3):
         logger.info(f"Mock saving file to S3 with internal name: {file_path}")
         return f"https://mock-s3-bucket/{os.path.basename(file_path)}"
     else:
-        file.save(file_path)
+        
+        if file:  # Save the file locally only if it exists
+            file.save(file_path)
         logger.info(f"File uploaded and saved locally at: {file_path}")
         threading.Thread(target=schedule_delete, args=(file_path, 600)).start()
         return None
@@ -124,3 +152,29 @@ def combine_and_save_metadata(video_metadata, user_metadata, internal_name, thum
     logger.info(f"Metadata saved with ID: {metadata_id}")
 
     return combined_metadata
+
+    
+    
+def process_url_request(url):
+    """Download a file from a URL and return its local path and internal name."""
+    try:
+        logger.info(f"Downloading file from URL: {url}")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()  # Raise an error for HTTP issues
+
+        # Generate a unique internal name
+        internal_name = str(uuid.uuid4())
+        file_extension = os.path.splitext(url.split('?')[0])[-1]  # Extract file extension from URL
+        filename = f"{internal_name}{file_extension}"
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+
+        # Save the file locally
+        with open(file_path, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                file.write(chunk)
+
+        logger.info(f"File downloaded and saved locally at: {file_path}")
+        return file_path, internal_name
+    except Exception as e:
+        logger.error(f"Error downloading file from URL: {e}")
+        raise ValueError("Failed to download file from the provided URL")
