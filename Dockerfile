@@ -1,19 +1,26 @@
-# Use an official Python runtime as a parent image
 FROM python:3.9-slim
-
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Install ffmpeg which is required for moviepy
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first
+COPY requirements.txt /app/
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir moviepy==1.0.3 decorator imageio imageio-ffmpeg proglog
+
+# Copy application code
 COPY . /app
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Make entrypoint script executable
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8080
 
-# Run main.py when the container launches
-CMD ["python", "main.py"]
+# Use the entrypoint script
+ENTRYPOINT ["./entrypoint.sh"]
