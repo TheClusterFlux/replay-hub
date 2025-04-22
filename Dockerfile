@@ -5,6 +5,8 @@ WORKDIR /app
 # Install ffmpeg which is required for moviepy
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    chromium \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first

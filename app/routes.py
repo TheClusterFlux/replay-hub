@@ -159,12 +159,18 @@ def process_url_request(url):
     """Download a file from a URL and return its local path and internal name."""
     try:
         logger.info(f"Downloading file from URL: {url}")
+        
+        # Special handling for Steam CDN URLs
+        if "cdn.steamusercontent.com" in url:
+            return process_steam_cdn_url(url)
+        
+        # Standard download for other URLs
         response = requests.get(url, stream=True)
         response.raise_for_status()  # Raise an error for HTTP issues
 
         # Generate a unique internal name
         internal_name = str(uuid.uuid4())
-        file_extension = os.path.splitext(url.split('?')[0])[-1]  # Extract file extension from URL
+        file_extension = os.path.splitext(url.split('?')[0])[-1] or ".mp4"  # Default to .mp4 if no extension
         filename = f"{internal_name}{file_extension}"
         file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
 
@@ -177,4 +183,93 @@ def process_url_request(url):
         return file_path, internal_name
     except Exception as e:
         logger.error(f"Error downloading file from URL: {e}")
-        raise ValueError("Failed to download file from the provided URL")
+        raise ValueError(f"Failed to download file from the provided URL: {e}")
+
+def process_steam_cdn_url(url):
+    """Handle Steam CDN URLs that require embedding."""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import time
+        
+        # Generate a unique internal name
+        internal_name = str(uuid.uuid4())
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{internal_name}.mp4")
+        
+        # Create a simple HTML file that embeds the steam content
+        embed_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Steam Content Embed</title></head>
+        <body>
+            <video width="640" height="480" controls autoplay id="steamVideo">
+                <source src="{url}" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+            <script>
+                // Mark when video is loaded
+                document.getElementById('steamVideo').onloadeddata = function() {{
+                    document.title = "LOADED:" + document.title;
+                }};
+            </script>
+        </body>
+        </html>
+        """
+        
+        embed_path = os.path.join(app.config["UPLOAD_FOLDER"], f"embed_{internal_name}.html")
+        with open(embed_path, 'w') as f:
+            f.write(embed_html)
+            
+        logger.info(f"Created embed HTML at: {embed_path}")
+        
+        # Setup headless browser
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        try:
+            # Load the embed page
+            driver.get(f"file://{os.path.abspath(embed_path)}")
+            logger.info("Waiting for video to load in headless browser...")
+            
+            # Wait for video to load (up to 30 seconds)
+            max_wait = 30
+            for _ in range(max_wait):
+                if "LOADED:" in driver.title:
+                    break
+                time.sleep(1)
+                
+            # Get the video content using JavaScript
+            video_src = driver.execute_script("""
+                var video = document.querySelector('video');
+                return video.src;
+            """)
+            
+            logger.info(f"Extracted video source: {video_src}")
+            
+            # Download the video using requests
+            response = requests.get(video_src, stream=True)
+            response.raise_for_status()
+            
+            with open(file_path, 'wb') as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    file.write(chunk)
+                    
+            logger.info(f"Successfully saved Steam video to: {file_path}")
+            
+            # Clean up the embed file
+            os.remove(embed_path)
+            
+            return file_path, internal_name
+        finally:
+            driver.quit()
+            
+    except ImportError:
+        logger.error("Selenium not installed. Cannot process Steam CDN URLs.")
+        raise ValueError("Selenium is required to process Steam CDN URLs. Install with 'pip install selenium'")
+    except Exception as e:
+        logger.error(f"Error processing Steam CDN URL: {e}")
+        raise ValueError(f"Failed to process Steam CDN URL: {e}")

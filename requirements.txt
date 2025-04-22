@@ -3,3 +3,5 @@ pymongo
 moviepy
 flask-cors
 requests
+selenium
+webdriver-manager
