@@ -31,6 +31,11 @@ def upload_to_s3(file_path, object_name=None):
     # Log AWS configuration details (without exposing sensitive information)
     logger.info(f"AWS Region: {S3_REGION}, Bucket Name: {S3_BUCKET_NAME}")
 
+    # Log AWS credentials and region for debugging (do not log secrets in production)
+    logger.info(f"AWS_ACCESS_KEY: {AWS_ACCESS_KEY[:4]}... (truncated for security)")
+    logger.info(f"AWS_SECRET_KEY: {AWS_SECRET_KEY[:4]}... (truncated for security)")
+    logger.info(f"S3_REGION: {S3_REGION}")
+
     # Create a boto3 client
     try:
         logger.info("Creating S3 client...")
@@ -66,11 +71,3 @@ def upload_to_s3(file_path, object_name=None):
     except Exception as e:
         logger.error(f"Unexpected error during S3 upload: {e}")
         return None
-    finally:
-        # Delete the file after upload attempt
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Deleted local file: {file_path}")
-            except Exception as e:
-                logger.error(f"Failed to delete local file: {file_path}. Error: {e}")
