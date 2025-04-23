@@ -76,7 +76,6 @@ def upload_file():
 
         return jsonify({
             "message": "File uploaded successfully",
-            "file_path": file_path if not s3_url else None,
             "s3_url": s3_url,
             "metadata": combined_metadata,
             "metadata_id": combined_metadata["_id"]

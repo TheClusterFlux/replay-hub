@@ -22,6 +22,17 @@ spec:
               secretKeyRef:
                 name: mongodb 
                 key: mongodb-root-password
+          - name: AWS_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: aws-s3-credentials
+                key: aws-access-key
+          - name: AWS_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: aws-s3-credentials
+                key: aws-secret-key
+                
       imagePullSecrets:
         - name: dockerhub-secret
 ---
