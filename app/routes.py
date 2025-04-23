@@ -31,6 +31,7 @@ def get_metadata():
     try:
         filters = request.args.to_dict()
         metadata = fetch_from_db(filters)
+        logger.info(f"Fetched metadata: {metadata}")
         return jsonify(metadata), 200
     except Exception as e:
         logger.error(f"Error fetching metadata: {e}")
