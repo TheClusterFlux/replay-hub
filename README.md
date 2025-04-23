@@ -35,19 +35,17 @@ To test the service locally:
      $env:IS_LOCAL="true"
      python main.py
      ```
-3. Start the Flask app:
+
+3. Set the aws credentials in the environment variables:
+   ```bash
+   export AWS_ACCESS_KEY_ID=your_access_key_id
+   export AWS_SECRET_ACCESS_KEY=your_secret_access_key
+   ````
+
+4. Start the Flask app:
    ```bash
    python main.py
    ```
-4. Test the API using tools like Postman or `curl`:
-   - Save data:
-     ```bash
-     curl -X POST -H "Content-Type: application/json" -d '{"key": "value"}' http://localhost:8080/save
-     ```
-   - Fetch data:
-     ```bash
-     curl http://localhost:8080/fetch
-     ```
 
 ### 2. Running in Kubernetes
 1. Deploy the service and MongoDB to your Kubernetes cluster using the provided YAML files or your own configurations.
@@ -93,33 +91,10 @@ This endpoint allows users to upload a video file, extract metadata (e.g., durat
 
 #### **Examples**
 
-1. **Save Locally**:
+1. **Upload Video File**:
    ```bash
    curl -X POST -F "file=@path/to/video.mp4" -F "title=My Video" -F "description=Test video upload" http://localhost:8080/upload
-   ```
-
-   **Response**:
-   ```json
-   {
-       "message": "File uploaded successfully",
-       "file_path": "./uploads/<uuid>.mp4",
-       "metadata": {
-           "duration": 120.5,
-           "resolution": "1920x1080",
-           "fps": 30,
-           "thumbnail": "./uploads/<uuid>_thumbnail.jpg",
-           "title": "My Video",
-           "description": "Test video upload",
-           "internal_name": "<uuid>",
-           "thumbnail_id": "<thumbnail_id>"
-       },
-       "metadata_id": "<metadata_id>"
-   }
-   ```
-
-2. **Save to S3**:
-   ```bash
-   curl -X POST -F "file=@path/to/video.mp4" -F "s3=true" -F "title=My Video" -F "description=Test video upload" http://localhost:8080/upload
+   curl -X POST -F "file=@C:\Users\keanu\Downloads\lv_0_20230425134138.mp4" -F "title=My Video" -F "description=Test video upload" http://localhost:8080/upload
    ```
 
    **Response**:
@@ -141,6 +116,31 @@ This endpoint allows users to upload a video file, extract metadata (e.g., durat
        "metadata_id": "<metadata_id>"
    }
    ```
+
+2. **Upload Url Video File**:
+   ```bash
+   curl -X POST -F "url=https://example.com/video.mp4" -F "title=My Video" -F "description=Test video upload" http://localhost:8080/upload
+   ```
+
+   **Response**:
+   ```json
+   {
+       "message": "File uploaded successfully",
+       "s3_url": "https://s3-bucket/<uuid>.mp4",
+       "metadata": {
+           "duration": 120.5,
+           "resolution": "1920x1080",
+           "fps": 30,
+           "thumbnail": "./uploads/<uuid>_thumbnail.jpg",
+           "title": "My Video",
+           "description": "Test video upload",
+           "internal_name": "<uuid>",
+           "thumbnail_id": "<thumbnail_id>",
+           "s3_url": "https://mock-s3-bucket/<uuid>.mp4"
+       },
+       "metadata_id": "<metadata_id>"
+   }
+   ```  
 ### `/thumbnail/<thumbnail_id>` - Retrieve a Thumbnail Image
 
 This endpoint retrieves a thumbnail image stored in a GridFS database using its unique `thumbnail_id`. The image is returned in `image/jpeg` format.

@@ -14,3 +14,9 @@ else:
     MONGO_URI = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_SERVICE_NAME}.{MONGO_NAMESPACE}.svc.cluster.local:{MONGO_PORT}"
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
+
+# AWS S3 settings
+AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY', '')
+AWS_SECRET_KEY = os.environ.get('AWS_SECRET_KEY', '')
+S3_BUCKET_NAME = 'replay-hub-storage'
+S3_REGION = 'eu-central-1'

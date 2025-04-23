@@ -28,6 +28,12 @@ def extract_video_metadata(file_path):
         raise
     finally:
         clip.close()
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"Deleted local video file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to delete local video file: {file_path}. Error: {e}")
 
 def schedule_delete(file_path, delay):
     """Schedule a file for deletion after a delay."""
