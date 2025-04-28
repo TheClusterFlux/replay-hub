@@ -1,0 +1,289 @@
+# Replay Hub Backend API Documentation
+
+## API Structure for the Improved Backend
+
+### 1. Video Metadata API
+
+**GET `/metadata`** - Get all videos  
+*Response format:*
+```json
+[
+  {
+    "id": "video123",
+    "title": "Example Video",
+    "description": "This is an example video description",
+    "s3_url": "https://bucket.s3.region.amazonaws.com/videos/example.mp4",
+    "thumbnail_id": "thumb123",
+    "duration": 324,
+    "resolution": "1920x1080",
+    "upload_date": "2025-04-20T14:30:00Z",
+    "uploader": "JohnDoe",
+    "views": 1542,
+    "likes": 120,
+    "dislikes": 5
+  },
+  // More videos...
+]
+```
+
+**GET `/metadata/{videoId}`** - Get specific video  
+*Response format:* Same as individual item in the list above
+
+**POST `/upload`** - Upload single video  
+*Request format (multipart/form-data):*
+- `file`: The video file binary data
+- `title`: Video title (string)
+- `description`: Video description (string)
+- `duration`: Optional video duration in seconds (number)
+- `resolution`: Optional video resolution (string)
+
+*Response format:*
+```json
+{
+  "success": true,
+  "metadata": {
+    "id": "video123",
+    "title": "Example Video",
+    "description": "This is an example video description",
+    "s3_url": "https://bucket.s3.region.amazonaws.com/videos/example.mp4",
+    "thumbnail_id": "thumb123",
+    "duration": 324,
+    "resolution": "1920x1080",
+    "upload_date": "2025-04-27T10:15:30Z",
+    "uploader": "JohnDoe"
+  }
+}
+```
+
+### 2. Comments API
+
+**GET `/comments/{videoId}`** - Get all comments for a specific video  
+*Response format:*
+```json
+[
+  {
+    "id": "comment123",
+    "videoId": "video123",
+    "userId": "user456",
+    "username": "JaneDoe",
+    "text": "Great video!",
+    "timestamp": "2025-04-26T08:12:45Z",
+    "likes": 5,
+    "dislikes": 0,
+    "replies": [
+      {
+        "id": "reply789",
+        "userId": "user567",
+        "username": "BobSmith",
+        "text": "I agree!",
+        "timestamp": "2025-04-26T09:30:22Z",
+        "likes": 1,
+        "dislikes": 0
+      }
+    ]
+  },
+  // More comments...
+]
+```
+
+**POST `/comments`** - Add a new comment  
+*Request format:*
+```json
+{
+  "videoId": "video123",
+  "userId": "user456",
+  "username": "JaneDoe",
+  "text": "This is my comment",
+  "timestamp": "2025-04-27T15:42:18Z"
+}
+```
+
+*Response format:*
+```json
+{
+  "id": "comment789",
+  "videoId": "video123",
+  "userId": "user456",
+  "username": "JaneDoe",
+  "text": "This is my comment",
+  "timestamp": "2025-04-27T15:42:18Z",
+  "likes": 0,
+  "dislikes": 0
+}
+```
+
+**POST `/comments/{commentId}/reply`** - Add a reply to a comment  
+*Request format:*
+```json
+{
+  "videoId": "video123",
+  "userId": "user567",
+  "username": "BobSmith",
+  "text": "This is my reply",
+  "timestamp": "2025-04-27T16:01:30Z"
+}
+```
+
+*Response format:* Similar to comment response
+
+### 3. Reactions API
+
+**POST `/reactions`** - Add or update a reaction  
+*Request format:*
+```json
+{
+  "videoId": "video123",
+  "userId": "user456",
+  "type": "like", // "like", "dislike", or "none" to remove
+  "timestamp": "2025-04-27T14:22:05Z"
+}
+```
+
+*Response format:*
+```json
+{
+  "success": true,
+  "videoId": "video123",
+  "currentLikes": 121,
+  "currentDislikes": 5
+}
+```
+
+**POST `/comments/{commentId}/reactions`** - Add or update a comment reaction  
+*Request format:*
+```json
+{
+  "commentId": "comment123",
+  "userId": "user456",
+  "type": "like", // "like", "dislike", or "none" to remove
+  "timestamp": "2025-04-27T14:25:10Z"
+}
+```
+
+*Response format:*
+```json
+{
+  "success": true,
+  "commentId": "comment123",
+  "currentLikes": 6,
+  "currentDislikes": 0
+}
+```
+
+### 4. Thumbnails API
+
+**GET `/thumbnail/{thumbnailId}`** - Get a thumbnail image  
+*Response:* The binary image data with appropriate content type
+
+**POST `/thumbnail/{videoId}`** - Upload custom thumbnail (optional feature)  
+*Request format (multipart/form-data):*
+- `file`: The image file binary data
+
+*Response format:*
+```json
+{
+  "success": true,
+  "videoId": "video123",
+  "thumbnailId": "thumb456",
+  "url": "https://yourdomain.com/thumbnail/thumb456"
+}
+```
+
+### 5. User Data API (for future implementation)
+
+**GET `/users/{userId}`** - Get user profile  
+**POST `/users/register`** - Register new user  
+**POST `/users/login`** - Login user  
+**PUT `/users/{userId}`** - Update user profile  
+
+### 6. Database Schema Recommendations
+
+Here's a simplified database schema to support these features:
+
+**Videos Table:**
+```
+id: string (primary key)
+title: string
+description: text
+s3_url: string
+thumbnail_id: string
+duration: number
+resolution: string
+upload_date: datetime
+uploader_id: string (foreign key to Users)
+views: number
+```
+
+**Comments Table:**
+```
+id: string (primary key)
+video_id: string (foreign key to Videos)
+user_id: string (foreign key to Users)
+parent_comment_id: string (nullable, self-reference for replies)
+text: text
+timestamp: datetime
+```
+
+**Reactions Table:**
+```
+id: string (primary key)
+type: enum ('like', 'dislike')
+user_id: string (foreign key to Users)
+video_id: string (nullable, foreign key to Videos)
+comment_id: string (nullable, foreign key to Comments)
+timestamp: datetime
+```
+
+**Users Table:**
+```
+id: string (primary key)
+username: string
+email: string
+password_hash: string
+created_at: datetime
+avatar_url: string
+```
+
+## Integration Points with Frontend
+
+Our frontend already implements these API calls in several JavaScript files:
+
+1. **app.js:** Contains the core API functions:
+   - `fetchVideos()` calls GET `/metadata`
+   - `fetchVideo()` calls GET `/metadata/{videoId}`
+   - `uploadVideo()` calls POST `/upload`
+   - `fetchComments()` calls GET `/comments/{videoId}`
+   - `addComment()` calls POST `/comments`
+   - `addReaction()` calls POST `/reactions`
+
+2. **video.js:** Handles the video page functionality and makes appropriate API calls for:
+   - Video playback
+   - Comments display and interaction
+   - Reactions (likes/dislikes)
+
+## Testing Your Backend Implementation
+
+After implementing these APIs, you can test them with the frontend by:
+
+1. Making sure the `BASE_URL` in app.js points to your backend server
+2. Uploading a test video through the UI and checking if it appears in the video list
+3. Adding comments to videos and checking if they persist
+4. Adding reactions (likes/dislikes) and verifying they're saved
+
+## Error Handling
+
+Ensure your backend provides appropriate error responses:
+
+```json
+{
+  "success": false,
+  "error": "Error message",
+  "code": 400
+}
+```
+
+Common error scenarios to handle:
+- Invalid file format during upload
+- Missing required fields
+- Authentication failures (for future user implementation)
+- Resource not found (404)
