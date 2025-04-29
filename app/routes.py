@@ -766,3 +766,233 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
     logger.info(f"Metadata saved to database with ID: {metadata['_id']}")
     
     return metadata
+
+@app.route('/upload/init', methods=['POST'])
+def init_chunked_upload():
+    """Initialize a chunked upload session."""
+    try:
+        logger.info("Initializing chunked upload")
+        
+        if 'action' not in request.form or request.form.get('action') != 'init_chunked_upload':
+            logger.error("Invalid action for chunked upload initialization")
+            return jsonify({"success": False, "error": "Invalid action", "code": 400}), 400
+            
+        file_id = request.form.get('fileId')
+        if not file_id:
+            logger.error("No fileId provided for chunked upload")
+            return jsonify({"success": False, "error": "No fileId provided", "code": 400}), 400
+            
+        # Create a temporary directory for this upload
+        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Store basic metadata for this upload
+        metadata = {
+            "fileId": file_id,
+            "filename": request.form.get('filename', ''),
+            "fileSize": request.form.get('fileSize', '0'),
+            "totalChunks": request.form.get('totalChunks', '0'),
+            "chunksReceived": 0,
+            "title": request.form.get('title', ''),
+            "description": request.form.get('description', ''),
+            "uploader": request.form.get('uploader', 'Anonymous'),
+            "players": request.form.get('players', '[]'),
+            "status": "initialized",
+            "created_at": datetime.datetime.now().isoformat()
+        }
+        
+        # Save metadata to a JSON file
+        with open(os.path.join(upload_dir, "metadata.json"), 'w') as f:
+            import json
+            json.dump(metadata, f)
+            
+        logger.info(f"Chunked upload initialized with ID: {file_id}")
+        
+        return jsonify({
+            "success": True,
+            "fileId": file_id,
+            "message": "Chunked upload initialized successfully"
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error initializing chunked upload: {e}")
+        return jsonify({"success": False, "error": str(e), "code": 500}), 500
+        
+@app.route('/upload/chunk', methods=['POST'])
+def upload_chunk():
+    """Handle uploading individual chunks of a file."""
+    try:
+        logger.info("Processing chunk upload")
+        
+        # Validate request
+        if 'file' not in request.files:
+            logger.error("No file part in chunk upload request")
+            return jsonify({"success": False, "error": "No file part in the request", "code": 400}), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            logger.error("No file selected for chunk upload")
+            return jsonify({"success": False, "error": "No file selected", "code": 400}), 400
+            
+        file_id = request.form.get('fileId')
+        chunk_index = request.form.get('chunkIndex')
+        total_chunks = request.form.get('totalChunks')
+        
+        if not file_id or not chunk_index or not total_chunks:
+            logger.error("Missing required parameters for chunk upload")
+            return jsonify({"success": False, "error": "Missing required parameters", "code": 400}), 400
+            
+        # Check if the upload was initialized
+        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
+        if not os.path.exists(upload_dir):
+            logger.error(f"Upload directory not found for fileId: {file_id}")
+            return jsonify({"success": False, "error": "Upload not initialized", "code": 400}), 400
+            
+        # Save this chunk to the upload directory
+        chunk_path = os.path.join(upload_dir, f"chunk_{chunk_index}")
+        file.save(chunk_path)
+        
+        # Update metadata
+        import json
+        metadata_path = os.path.join(upload_dir, "metadata.json")
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+            
+        metadata["chunksReceived"] = metadata.get("chunksReceived", 0) + 1
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+            
+        logger.info(f"Chunk {chunk_index} of {total_chunks} saved for file ID {file_id}")
+        
+        return jsonify({
+            "success": True,
+            "fileId": file_id,
+            "chunkIndex": chunk_index,
+            "chunksReceived": metadata["chunksReceived"],
+            "totalChunks": total_chunks
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error uploading chunk: {e}")
+        return jsonify({"success": False, "error": str(e), "code": 500}), 500
+        
+@app.route('/upload/finalize', methods=['POST'])
+def finalize_upload():
+    """Finalize a chunked upload by combining all chunks and processing the complete file."""
+    try:
+        logger.info("Finalizing chunked upload")
+        
+        if 'action' not in request.form or request.form.get('action') != 'finalize_chunked_upload':
+            logger.error("Invalid action for chunked upload finalization")
+            return jsonify({"success": False, "error": "Invalid action", "code": 400}), 400
+            
+        file_id = request.form.get('fileId')
+        if not file_id:
+            logger.error("No fileId provided for chunked upload finalization")
+            return jsonify({"success": False, "error": "No fileId provided", "code": 400}), 400
+            
+        # Check if the upload was initialized
+        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
+        if not os.path.exists(upload_dir):
+            logger.error(f"Upload directory not found for fileId: {file_id}")
+            return jsonify({"success": False, "error": "Upload not initialized", "code": 400}), 400
+            
+        # Load metadata
+        import json
+        metadata_path = os.path.join(upload_dir, "metadata.json")
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+            
+        # Check if all chunks have been received
+        chunks_received = metadata.get("chunksReceived", 0)
+        total_chunks = int(metadata.get("totalChunks", "0"))
+        
+        if chunks_received != total_chunks:
+            logger.error(f"Not all chunks received. Got {chunks_received}/{total_chunks}")
+            return jsonify({
+                "success": False,
+                "error": f"Not all chunks received. Got {chunks_received}/{total_chunks}",
+                "code": 400
+            }), 400
+            
+        # Generate a name for the complete file
+        original_filename = request.form.get('filename', metadata.get("filename", ""))
+        file_ext = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else 'mp4'
+        internal_name = str(uuid.uuid4())
+        complete_file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{internal_name}.{file_ext}")
+        
+        # Combine all chunks into the complete file
+        with open(complete_file_path, 'wb') as outfile:
+            for i in range(total_chunks):
+                chunk_path = os.path.join(upload_dir, f"chunk_{i}")
+                
+                if not os.path.exists(chunk_path):
+                    logger.error(f"Chunk {i} not found at {chunk_path}")
+                    return jsonify({"success": False, "error": f"Chunk {i} not found", "code": 400}), 400
+                
+                with open(chunk_path, 'rb') as infile:
+                    outfile.write(infile.read())
+                    
+        logger.info(f"All chunks combined into complete file: {complete_file_path}")
+        
+        # Update metadata status
+        metadata["status"] = "combined"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+            
+        # Now process the complete file similar to the regular upload endpoint
+        save_to_s3 = True
+        
+        # Handle S3 or local saving
+        s3_url = handle_file_storage(None, complete_file_path, save_to_s3)
+        
+        # Extract video metadata
+        video_metadata = extract_video_metadata(complete_file_path)
+        
+        # Save the thumbnail to GridFS and delete it locally
+        thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
+        
+        # Get form data from the original metadata
+        form_data = {
+            "title": request.form.get('title', metadata.get("title", "")),
+            "description": request.form.get('description', metadata.get("description", "")),
+            "uploader": request.form.get('uploader', metadata.get("uploader", "Anonymous")),
+            "players": request.form.get('players', metadata.get("players", "[]"))
+        }
+        
+        # Combine metadata and save to MongoDB
+        combined_metadata = combine_and_save_metadata(
+            video_metadata, form_data, internal_name, thumbnail_id, s3_url
+        )
+        
+        # Schedule deletion of the complete file now that processing is done
+        if save_to_s3 and os.path.exists(complete_file_path):
+            logger.info(f"Scheduling deletion of complete file: {complete_file_path}")
+            schedule_delete(complete_file_path, delay=3600)  # Delete after 1 hour
+            
+        # Schedule deletion of the chunks directory
+        logger.info(f"Scheduling deletion of chunks directory: {upload_dir}")
+        schedule_delete(upload_dir, delay=3600)  # Delete after 1 hour
+        
+        # Format response to match API documentation
+        response_data = {
+            "success": True,
+            "metadata": {
+                "id": combined_metadata.get("_id", ""),
+                "title": combined_metadata.get("title", ""),
+                "description": combined_metadata.get("description", ""),
+                "s3_url": combined_metadata.get("s3_url", ""),
+                "thumbnail_id": combined_metadata.get("thumbnail_id", ""),
+                "duration": combined_metadata.get("duration", 0),
+                "resolution": combined_metadata.get("resolution", ""),
+                "upload_date": combined_metadata.get("upload_date", datetime.datetime.now().isoformat()),
+                "uploader": combined_metadata.get("uploader", "Anonymous")
+            }
+        }
+        
+        return jsonify(response_data), 201
+        
+    except Exception as e:
+        logger.error(f"Error finalizing chunked upload: {e}")
+        return jsonify({"success": False, "error": str(e), "code": 500}), 500
