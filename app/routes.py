@@ -1,6 +1,6 @@
 import os
 import threading
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
 from app import app, logger
 from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document
@@ -9,11 +9,19 @@ from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
 import uuid
 import requests
-import datetime  
+import datetime
+import tempfile
+import shutil
 
 # Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+# Configure Flask for large file uploads (10GB max)
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024 * 1024  # 10GB in bytes
+
+# Set streaming threshold to handle large files without loading them into memory
+app.config['MAX_CONTENT_LENGTH_FOR_STREAMING'] = 1 * 1024 * 1024  # Use streaming for files larger than 1MB
 
 
 @app.route('/thumbnail/<thumbnail_id>', methods=['GET'])
@@ -536,3 +544,190 @@ def upload_thumbnail(video_id):
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
 
 # Keep the existing code for process_upload_request, handle_file_storage, etc.
+
+def process_url_request(url):
+    """Process a video from a URL.
+    
+    :param url: URL of the video to download
+    :return: tuple of (file_path, internal_name)
+    """
+    logger.info(f"Processing video from URL: {url}")
+    
+    # Generate a unique name for the file
+    internal_name = str(uuid.uuid4())
+    file_ext = url.split('.')[-1].split('?')[0] if '.' in url.split('/')[-1] else 'mp4'
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{internal_name}.{file_ext}")
+    
+    # Download the file in chunks to handle large files
+    try:
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        logger.info(f"Successfully downloaded video from URL to: {file_path}")
+        return file_path, internal_name
+    except Exception as e:
+        logger.error(f"Error downloading video from URL: {e}")
+        raise
+
+def process_upload_request():
+    """Process an uploaded file from a multipart/form-data request.
+    
+    :return: tuple of (file, file_path, internal_name, save_to_s3)
+    """
+    logger.info("Processing file upload request")
+    
+    # Check if the post request has the file part
+    if 'file' not in request.files:
+        logger.error("No file part in the request")
+        raise ValueError("No file part in the request")
+        
+    file = request.files['file']
+    
+    # If user does not select file, browser may submit an empty file without filename
+    if file.filename == '':
+        logger.error("No file selected for uploading")
+        raise ValueError("No file selected for uploading")
+        
+    # Generate a unique name for the file
+    internal_name = str(uuid.uuid4())
+    file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'mp4'
+    filename = f"{internal_name}.{file_ext}"
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    
+    # Check for streaming threshold
+    content_length = request.content_length or 0
+    if content_length > app.config.get('MAX_CONTENT_LENGTH_FOR_STREAMING', 1024 * 1024):
+        logger.info(f"File size exceeds streaming threshold ({content_length} bytes). Using streaming upload.")
+        
+        # Stream the file to disk in chunks
+        try:
+            file.save(file_path)
+            logger.info(f"Successfully saved large file to: {file_path}")
+        except Exception as e:
+            logger.error(f"Error saving large file: {e}")
+            raise
+    else:
+        # For smaller files, use the standard approach
+        try:
+            file.save(file_path)
+            logger.info(f"Successfully saved file to: {file_path}")
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            raise
+            
+    # Determine if we should save to S3
+    save_to_s3 = request.form.get('save_to_s3', 'true').lower() != 'false'
+    
+    return file, file_path, internal_name, save_to_s3
+
+def handle_file_storage(file, file_path, save_to_s3=True):
+    """Handle S3 or local storage for an uploaded file.
+    
+    :param file: The file object (may be None for URL-based uploads)
+    :param file_path: Path where the file is temporarily stored
+    :param save_to_s3: Whether to save to S3 (True) or keep locally (False)
+    :return: URL where the file is accessible
+    """
+    logger.info(f"Handling file storage for: {file_path}, Save to S3: {save_to_s3}")
+    
+    try:
+        if save_to_s3:
+            # Determine content type based on file extension
+            content_type = None
+            if file_path:
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.mp4':
+                    content_type = 'video/mp4'
+                elif ext in ['.m3u8', '.m3u']:
+                    content_type = 'application/x-mpegURL'
+                elif ext == '.ts':
+                    content_type = 'video/MP2T'
+            
+            # Upload to S3 directly from the file path (streaming)
+            logger.info(f"Uploading file to S3: {file_path}")
+            s3_url = upload_to_s3(file_path, content_type=content_type)
+            
+            if s3_url:
+                logger.info(f"File uploaded successfully to S3. URL: {s3_url}")
+                
+                # Schedule local file deletion after some time
+                schedule_delete(file_path, delay=3600)  # Delete after 1 hour
+                
+                return s3_url
+            else:
+                logger.error("Failed to upload to S3, falling back to local storage")
+        
+        # If not saving to S3 or S3 upload failed, return local URL
+        filename = os.path.basename(file_path)
+        local_url = f"/uploads/{filename}"
+        logger.info(f"Using local storage. URL: {local_url}")
+        return local_url
+        
+    except Exception as e:
+        logger.error(f"Error handling file storage: {e}")
+        raise
+
+def save_thumbnail_to_gridfs(video_metadata, internal_name):
+    """Save thumbnail to GridFS and return its ID.
+    
+    :param video_metadata: Metadata dict that contains the thumbnail path
+    :param internal_name: Internal name of the video
+    :return: ObjectId of the saved thumbnail
+    """
+    logger.info("Saving thumbnail to GridFS")
+    
+    thumbnail_path = video_metadata.get('thumbnail_path')
+    if not thumbnail_path or not os.path.exists(thumbnail_path):
+        logger.warning("No thumbnail available")
+        return None
+        
+    try:
+        with open(thumbnail_path, 'rb') as f:
+            thumbnail_id = fs.put(f, filename=f"{internal_name}_thumbnail.jpg")
+        logger.info(f"Thumbnail saved to GridFS with ID: {thumbnail_id}")
+        
+        # Delete local thumbnail file as it's now in GridFS
+        os.remove(thumbnail_path)
+        logger.info(f"Local thumbnail file deleted: {thumbnail_path}")
+        
+        return str(thumbnail_id)
+    except Exception as e:
+        logger.error(f"Error saving thumbnail to GridFS: {e}")
+        return None
+
+def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnail_id, s3_url):
+    """Combine metadata from various sources and save to the database.
+    
+    :param video_metadata: Metadata extracted from the video file
+    :param form_data: Metadata from the form submission
+    :param internal_name: Internal name of the video
+    :param thumbnail_id: ID of the thumbnail in GridFS
+    :param s3_url: URL of the video in S3 or local storage
+    :return: Combined metadata dict as saved to the database
+    """
+    logger.info("Combining and saving metadata")
+    
+    # Create the metadata document
+    metadata = {
+        "_id": form_data.get('id', str(uuid.uuid4())),
+        "title": form_data.get('title', os.path.basename(video_metadata.get('file_path', ''))),
+        "description": form_data.get('description', ''),
+        "s3_url": s3_url,
+        "internal_name": internal_name,
+        "thumbnail_id": thumbnail_id,
+        "duration": video_metadata.get('duration', 0),
+        "resolution": video_metadata.get('resolution', ''),
+        "upload_date": datetime.datetime.now().isoformat(),
+        "uploader": form_data.get('uploader', 'Anonymous'),
+        "views": 0,
+        "likes": 0,
+        "dislikes": 0
+    }
+    
+    # Save to database
+    save_to_db(metadata)
+    logger.info(f"Metadata saved to database with ID: {metadata['_id']}")
+    
+    return metadata
