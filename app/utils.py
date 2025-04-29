@@ -13,13 +13,14 @@ def extract_video_metadata(file_path):
         metadata = {
             "duration": clip.duration,
             "resolution": f"{clip.size[0]}x{clip.size[1]}",
-            "fps": clip.fps
+            "fps": clip.fps,
+            "file_path": file_path  # Add the file path to the metadata
         }
 
         # Generate a thumbnail
         thumbnail_path = file_path + "_thumbnail.jpg"
         clip.save_frame(thumbnail_path, t=0)
-        metadata["thumbnail"] = thumbnail_path
+        metadata["thumbnail_path"] = thumbnail_path
 
         logger.info(f"Extracted metadata: {metadata}")
         return metadata
@@ -27,13 +28,10 @@ def extract_video_metadata(file_path):
         logger.error(f"Error extracting metadata: {e}")
         raise
     finally:
-        clip.close()
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Deleted local video file: {file_path}")
-            except Exception as e:
-                logger.error(f"Failed to delete local video file: {file_path}. Error: {e}")
+        # Just close the clip but don't delete the file here
+        # The file will be deleted after the entire upload process is complete
+        if 'clip' in locals() and clip:
+            clip.close()
 
 def schedule_delete(file_path, delay):
     """Schedule a file for deletion after a delay."""
