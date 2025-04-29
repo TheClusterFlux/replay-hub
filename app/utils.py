@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import threading
 from moviepy.editor import VideoFileClip
 from app import logger
 
@@ -34,14 +35,21 @@ def extract_video_metadata(file_path):
             clip.close()
 
 def schedule_delete(file_path, delay):
-    """Schedule a file for deletion after a delay."""
-    try:
-        logger.info(f"Scheduling deletion of file: {file_path} in {delay} seconds")
-        time.sleep(delay)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"File deleted: {file_path}")
-        else:
-            logger.warning(f"File not found for deletion: {file_path}")
-    except Exception as e:
-        logger.error(f"Error deleting file: {e}")
+    """Schedule a file for deletion after a delay using a background thread."""
+    def delete_after_delay(path, wait_time):
+        try:
+            logger.info(f"Scheduled deletion of file: {path} in {wait_time} seconds")
+            time.sleep(wait_time)
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"File deleted: {path}")
+            else:
+                logger.warning(f"File not found for deletion: {path}")
+        except Exception as e:
+            logger.error(f"Error deleting file: {e}")
+    
+    # Start a background thread that won't block the main process
+    delete_thread = threading.Thread(target=delete_after_delay, args=(file_path, delay))
+    delete_thread.daemon = True  # Daemon thread will be killed when main thread exits
+    delete_thread.start()
+    logger.info(f"Started background thread for file deletion: {file_path}")

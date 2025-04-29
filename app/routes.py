@@ -134,6 +134,11 @@ def upload_file():
             video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
         )
         
+        # Now that all processing is done, schedule the local file for deletion
+        if save_to_s3 and os.path.exists(file_path):
+            logger.info(f"Processing complete, scheduling deletion of local file: {file_path}")
+            schedule_delete(file_path, delay=3600)  # Delete after 1 hour
+        
         # Format response to match API documentation
         response_data = {
             "success": True,
@@ -651,10 +656,8 @@ def handle_file_storage(file, file_path, save_to_s3=True):
             
             if s3_url:
                 logger.info(f"File uploaded successfully to S3. URL: {s3_url}")
-                
-                # Schedule local file deletion after some time
-                schedule_delete(file_path, delay=3600)  # Delete after 1 hour
-                
+                # Don't schedule deletion here - let the upload_file function handle this
+                # after processing is complete
                 return s3_url
             else:
                 logger.error("Failed to upload to S3, falling back to local storage")
