@@ -85,16 +85,38 @@ def get_video_metadata(video_id):
             "uploader": video.get("uploader", "Anonymous"),
             "views": video.get("views", 0),
             "likes": video.get("likes", 0),
-            "dislikes": video.get("dislikes", 0)
+            "dislikes": video.get("dislikes", 0),
+            "players": video.get("players", [])
         }
-        
-        # Increment view count
-        update_db({"_id": video_id}, {"$inc": {"views": 1}})
         
         return jsonify(formatted_video), 200
     except Exception as e:
         logger.error(f"Error fetching video metadata: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/metadata/<video_id>/view', methods=['POST'])
+def increment_view_count(video_id):
+    """Increment view count for a specific video."""
+    try:
+        video = get_single_document({"_id": video_id})
+        if not video:
+            return jsonify({"success": False, "error": "Video not found"}), 404
+            
+        # Increment view count
+        update_db({"_id": video_id}, {"$inc": {"views": 1}})
+        
+        # Get updated view count
+        updated_video = get_single_document({"_id": video_id})
+        current_views = updated_video.get("views", 0)
+        
+        return jsonify({
+            "success": True,
+            "videoId": video_id,
+            "views": current_views
+        }), 200
+    except Exception as e:
+        logger.error(f"Error incrementing view count: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
     
 
 @app.route('/metadata', methods=['DELETE'])
@@ -712,6 +734,15 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
     """
     logger.info("Combining and saving metadata")
     
+    # Process players if provided
+    players = []
+    if form_data.get('players'):
+        try:
+            import json
+            players = json.loads(form_data.get('players', '[]'))
+        except Exception as e:
+            logger.error(f"Error parsing players JSON: {e}")
+    
     # Create the metadata document
     metadata = {
         "_id": form_data.get('id', str(uuid.uuid4())),
@@ -726,7 +757,8 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
         "uploader": form_data.get('uploader', 'Anonymous'),
         "views": 0,
         "likes": 0,
-        "dislikes": 0
+        "dislikes": 0,
+        "players": players
     }
     
     # Save to database
