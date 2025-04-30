@@ -357,6 +357,16 @@ def add_reaction():
         user_id = data.get("userId")
         reaction_type = data.get("type")
         
+        # First check if the video exists before proceeding
+        try:
+            video = get_single_document({"_id": ObjectId(video_id)})
+        except:
+            video = get_single_document({"_id": video_id})
+            
+        if not video:
+            logger.error(f"Cannot add reaction: Video with id {video_id} not found")
+            return jsonify({"success": False, "error": "Video not found", "code": 404}), 404
+            
         # Validate reaction type
         if reaction_type not in ["like", "dislike", "none"]:
             return jsonify({"success": False, "error": "Invalid reaction type", "code": 400}), 400
@@ -377,9 +387,16 @@ def add_reaction():
                 # Update video like/dislike counts
                 old_type = existing_reaction.get("type")
                 if old_type == "like":
-                    update_db({"_id": video_id}, {"$inc": {"likes": -1}})
+                    try:
+                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": -1}})
+                    except:
+                        # If conversion fails, try using the string ID directly
+                        update_db({"_id": video_id}, {"$inc": {"likes": -1}})
                 elif old_type == "dislike":
-                    update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
+                    try:
+                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": -1}})
+                    except:
+                        update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
         else:
             # Add new reaction or update existing
             if existing_reaction:
@@ -394,14 +411,26 @@ def add_reaction():
                     
                     # Update video metrics
                     if old_type == "like":
-                        update_db({"_id": video_id}, {"$inc": {"likes": -1}})
+                        try:
+                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": -1}})
+                        except:
+                            update_db({"_id": video_id}, {"$inc": {"likes": -1}})
                     elif old_type == "dislike":
-                        update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
+                        try:
+                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": -1}})
+                        except:
+                            update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
                         
                     if reaction_type == "like":
-                        update_db({"_id": video_id}, {"$inc": {"likes": 1}})
+                        try:
+                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": 1}})
+                        except:
+                            update_db({"_id": video_id}, {"$inc": {"likes": 1}})
                     elif reaction_type == "dislike":
-                        update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
+                        try:
+                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": 1}})
+                        except:
+                            update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
             else:
                 # Create new reaction
                 reaction = {
@@ -415,14 +444,31 @@ def add_reaction():
                 
                 # Update video metrics
                 if reaction_type == "like":
-                    update_db({"_id": video_id}, {"$inc": {"likes": 1}})
+                    try:
+                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": 1}})
+                    except:
+                        update_db({"_id": video_id}, {"$inc": {"likes": 1}})
                 elif reaction_type == "dislike":
-                    update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
+                    try:
+                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": 1}})
+                    except:
+                        update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
         
         # Get current likes/dislikes count for the video
-        video = get_single_document({"_id": video_id})
-        current_likes = video.get("likes", 0)
-        current_dislikes = video.get("dislikes", 0)
+        try:
+            updated_video = get_single_document({"_id": ObjectId(video_id)})
+        except:
+            updated_video = get_single_document({"_id": video_id})
+        
+        if not updated_video:
+            logger.error(f"Video not found after updating: {video_id}")
+            # Since we already verified the video exists above, we'll use the original video object
+            # to avoid a 500 error, even if it has outdated counts
+            current_likes = video.get("likes", 0)
+            current_dislikes = video.get("dislikes", 0)
+        else:
+            current_likes = updated_video.get("likes", 0)
+            current_dislikes = updated_video.get("dislikes", 0)
         
         return jsonify({
             "success": True,
