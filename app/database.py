@@ -39,15 +39,32 @@ def fetch_from_db(query):
 def get_single_document(query):
     """Fetch a single document from MongoDB."""
     logger.info(f"Fetching single document with query: {query}")
-    # Convert string _id to ObjectId if needed
-    if '_id' in query and isinstance(query['_id'], str):
+    
+    # Create a copy of the query to avoid modifying the original
+    query_copy = dict(query)
+    
+    # Convert string _id to ObjectId if needed and looks like a MongoDB ObjectID
+    if '_id' in query_copy and isinstance(query_copy['_id'], str):
+        # First try direct string match (for UUIDs)
+        doc = collection.find_one({'_id': query_copy['_id']})
+        if doc:
+            logger.info(f"Found document using direct string match for _id: {query_copy['_id']}")
+            # Convert ObjectId to string for JSON serialization
+            if '_id' in doc:
+                doc['_id'] = str(doc['_id'])
+            return doc
+    
+        # If no results with direct string match, try as ObjectId
         try:
-            query['_id'] = ObjectId(query['_id'])
+            query_copy['_id'] = ObjectId(query_copy['_id'])
         except:
-            # If conversion fails, keep it as is (might be a custom ID)
-            pass
+            # If conversion fails, keep original string (UUID or custom ID)
+            logger.info(f"Could not convert _id to ObjectId, using as string: {query_copy['_id']}")
+            # Already attempted string match above, so no need to retry
+            return None
             
-    doc = collection.find_one(query)
+    # Execute query with potentially converted ObjectId
+    doc = collection.find_one(query_copy)
     
     # Convert ObjectId to string for JSON serialization
     if doc and '_id' in doc:
