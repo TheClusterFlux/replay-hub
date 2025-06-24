@@ -99,22 +99,24 @@ def get_video_metadata(video_id):
 
 @app.route('/metadata/<video_id>/view', methods=['POST'])
 def increment_view_count(video_id):
-    """Increment view count for a specific video."""
+    """Increment view count for a specific video by _id or short_id."""
     try:
-        video = get_single_document({"short_id": video_id})
+        # Try to find by _id (ObjectId or string)
+        video = get_single_document({"_id": video_id})
+        if not video:
+            # Try to find by short_id
+            video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"success": False, "error": "Video not found"}), 404
-            
-        # Increment view count
-        update_db({"_id": video_id}, {"$inc": {"views": 1}})
-        
+        # Use the actual _id for updating
+        real_id = video.get("_id", video_id)
+        update_db({"_id": real_id}, {"$inc": {"views": 1}})
         # Get updated view count
-        updated_video = get_single_document({"_id": video_id})
-        current_views = updated_video.get("views", 0)
-        
+        updated_video = get_single_document({"_id": real_id})
+        current_views = updated_video.get("views", 0) if updated_video else 0
         return jsonify({
             "success": True,
-            "videoId": video_id,
+            "videoId": real_id,
             "views": current_views
         }), 200
     except Exception as e:
@@ -478,7 +480,7 @@ def add_reaction():
             "videoId": video_id,
             "currentLikes": current_likes,
             "currentDislikes": current_dislikes
-        }), 200
+        }, 200)
     except Exception as e:
         logger.error(f"Error adding reaction: {e}")
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
