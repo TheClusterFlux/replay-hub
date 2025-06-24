@@ -72,7 +72,11 @@ def get_metadata():
 def get_video_metadata(video_id):
     """Retrieve metadata for a specific video by _id, short_id, or legacy UUID."""
     try:
-        video = get_single_document({"short_id": video_id})
+        # Try to find by _id first
+        video = get_single_document({"_id": video_id})
+        if not video:
+            # Try to find by short_id
+            video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"error": "Video not found"}), 404
         # Format the response to match API specs
@@ -108,15 +112,21 @@ def increment_view_count(video_id):
             video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"success": False, "error": "Video not found"}), 404
-        # Use the actual _id for updating
-        real_id = video.get("_id", video_id)
-        update_db({"_id": real_id}, {"$inc": {"views": 1}})
+        
+        # Use the actual _id from the found video for updating
+        actual_id = video.get("_id")
+        if not actual_id:
+            return jsonify({"success": False, "error": "Video has no _id"}), 500
+            
+        update_db({"_id": actual_id}, {"$inc": {"views": 1}})
+        
         # Get updated view count
-        updated_video = get_single_document({"_id": real_id})
+        updated_video = get_single_document({"_id": actual_id})
         current_views = updated_video.get("views", 0) if updated_video else 0
+        
         return jsonify({
             "success": True,
-            "videoId": real_id,
+            "videoId": actual_id,
             "views": current_views
         }), 200
     except Exception as e:
@@ -363,14 +373,17 @@ def add_reaction():
         reaction_type = data.get("type")
         
         # First check if the video exists before proceeding
-        try:
-            video = get_single_document({"short_id": ObjectId(video_id)})
-        except:
+        video = get_single_document({"_id": video_id})
+        if not video:
+            # Try to find by short_id
             video = get_single_document({"short_id": video_id})
             
         if not video:
             logger.error(f"Cannot add reaction: Video with id {video_id} not found")
             return jsonify({"success": False, "error": "Video not found", "code": 404}), 404
+            
+        # Get the actual _id for database operations
+        actual_video_id = video.get("_id")
             
         # Validate reaction type
         if reaction_type not in ["like", "dislike", "none"]:
@@ -392,16 +405,9 @@ def add_reaction():
                 # Update video like/dislike counts
                 old_type = existing_reaction.get("type")
                 if old_type == "like":
-                    try:
-                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": -1}})
-                    except:
-                        # If conversion fails, try using the string ID directly
-                        update_db({"_id": video_id}, {"$inc": {"likes": -1}})
+                    update_db({"_id": actual_video_id}, {"$inc": {"likes": -1}})
                 elif old_type == "dislike":
-                    try:
-                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": -1}})
-                    except:
-                        update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
+                    update_db({"_id": actual_video_id}, {"$inc": {"dislikes": -1}})
         else:
             # Add new reaction or update existing
             if existing_reaction:
@@ -416,26 +422,14 @@ def add_reaction():
                     
                     # Update video metrics
                     if old_type == "like":
-                        try:
-                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": -1}})
-                        except:
-                            update_db({"_id": video_id}, {"$inc": {"likes": -1}})
+                        update_db({"_id": actual_video_id}, {"$inc": {"likes": -1}})
                     elif old_type == "dislike":
-                        try:
-                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": -1}})
-                        except:
-                            update_db({"_id": video_id}, {"$inc": {"dislikes": -1}})
+                        update_db({"_id": actual_video_id}, {"$inc": {"dislikes": -1}})
                         
                     if reaction_type == "like":
-                        try:
-                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": 1}})
-                        except:
-                            update_db({"_id": video_id}, {"$inc": {"likes": 1}})
+                        update_db({"_id": actual_video_id}, {"$inc": {"likes": 1}})
                     elif reaction_type == "dislike":
-                        try:
-                            update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": 1}})
-                        except:
-                            update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
+                        update_db({"_id": actual_video_id}, {"$inc": {"dislikes": 1}})
             else:
                 # Create new reaction
                 reaction = {
@@ -449,21 +443,12 @@ def add_reaction():
                 
                 # Update video metrics
                 if reaction_type == "like":
-                    try:
-                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"likes": 1}})
-                    except:
-                        update_db({"_id": video_id}, {"$inc": {"likes": 1}})
+                    update_db({"_id": actual_video_id}, {"$inc": {"likes": 1}})
                 elif reaction_type == "dislike":
-                    try:
-                        update_db({"_id": ObjectId(video_id)}, {"$inc": {"dislikes": 1}})
-                    except:
-                        update_db({"_id": video_id}, {"$inc": {"dislikes": 1}})
+                    update_db({"_id": actual_video_id}, {"$inc": {"dislikes": 1}})
         
         # Get current likes/dislikes count for the video
-        try:
-            updated_video = get_single_document({"_id": ObjectId(video_id)})
-        except:
-            updated_video = get_single_document({"_id": video_id})
+        updated_video = get_single_document({"_id": actual_video_id})
         
         if not updated_video:
             logger.error(f"Video not found after updating: {video_id}")
@@ -589,10 +574,15 @@ def add_comment_reaction(comment_id):
 def upload_thumbnail(video_id):
     """Upload a custom thumbnail for a video."""
     try:
-        # Check if the video exists
-        video = get_single_document({"short_id": video_id})
+        # Check if the video exists by _id or short_id
+        video = get_single_document({"_id": video_id})
+        if not video:
+            video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"success": False, "error": "Video not found", "code": 404}), 404
+            
+        # Get the actual _id for database operations
+        actual_video_id = video.get("_id")
             
         # Validate file upload
         if 'file' not in request.files:
@@ -605,15 +595,15 @@ def upload_thumbnail(video_id):
         # Save thumbnail to GridFS
         thumbnail_id = fs.put(file, filename=f"{video_id}_custom_thumbnail.jpg")
         
-        # Update the video's thumbnail_id
-        update_db({"_id": video_id}, {"$set": {"thumbnail_id": str(thumbnail_id)}})
+        # Update the video's thumbnail_id using the actual _id
+        update_db({"_id": actual_video_id}, {"$set": {"thumbnail_id": str(thumbnail_id)}})
         
         # Generate the thumbnail URL
         thumbnail_url = f"{request.url_root.rstrip('/')}/thumbnail/{str(thumbnail_id)}"
         
         return jsonify({
             "success": True,
-            "videoId": video_id,
+            "videoId": actual_video_id,
             "thumbnailId": str(thumbnail_id),
             "url": thumbnail_url
         }), 200
