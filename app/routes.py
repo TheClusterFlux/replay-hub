@@ -72,14 +72,7 @@ def get_metadata():
 def get_video_metadata(video_id):
     """Retrieve metadata for a specific video by _id, short_id, or legacy UUID."""
     try:
-        # Try to find by _id (ObjectId or string)
-        video = get_single_document({"_id": video_id})
-        if not video:
-            # Try to find by short_id
-            video = get_single_document({"short_id": video_id})
-        if not video:
-            # Try to find by legacy UUID (32 or 36 char hex)
-            video = get_single_document({"uuid": video_id})
+        video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"error": "Video not found"}), 404
         # Format the response to match API specs
@@ -369,9 +362,9 @@ def add_reaction():
         
         # First check if the video exists before proceeding
         try:
-            video = get_single_document({"_id": ObjectId(video_id)})
+            video = get_single_document({"short_id": ObjectId(video_id)})
         except:
-            video = get_single_document({"_id": video_id})
+            video = get_single_document({"short_id": video_id})
             
         if not video:
             logger.error(f"Cannot add reaction: Video with id {video_id} not found")
@@ -595,7 +588,7 @@ def upload_thumbnail(video_id):
     """Upload a custom thumbnail for a video."""
     try:
         # Check if the video exists
-        video = get_single_document({"_id": video_id})
+        video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"success": False, "error": "Video not found", "code": 404}), 404
             
