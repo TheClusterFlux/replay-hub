@@ -12,6 +12,8 @@ import requests
 import datetime
 import tempfile
 import shutil
+import random
+import string
 
 # Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -45,6 +47,7 @@ def get_metadata():
         for item in metadata:
             formatted_item = {
                 "id": item.get("_id", str(uuid.uuid4())),
+                "short_id": item.get("short_id", ""),
                 "title": item.get("title", ""),
                 "description": item.get("description", ""),
                 "s3_url": item.get("s3_url", ""),
@@ -55,7 +58,8 @@ def get_metadata():
                 "uploader": item.get("uploader", "Anonymous"),
                 "views": item.get("views", 0),
                 "likes": item.get("likes", 0),
-                "dislikes": item.get("dislikes", 0)
+                "dislikes": item.get("dislikes", 0),
+                "players": item.get("players", [])
             }
             formatted_metadata.append(formatted_item)
         logger.info(f"Fetched metadata: {formatted_metadata}")
@@ -66,15 +70,19 @@ def get_metadata():
 
 @app.route('/metadata/<video_id>', methods=['GET'])
 def get_video_metadata(video_id):
-    """Retrieve metadata for a specific video."""
+    """Retrieve metadata for a specific video by _id or short_id."""
     try:
+        # Try to find by _id first
         video = get_single_document({"_id": video_id})
         if not video:
+            # Try to find by short_id
+            video = get_single_document({"short_id": video_id})
+        if not video:
             return jsonify({"error": "Video not found"}), 404
-            
         # Format the response to match API specs
         formatted_video = {
             "id": video.get("_id", video_id),
+            "short_id": video.get("short_id", ""),
             "title": video.get("title", ""),
             "description": video.get("description", ""),
             "s3_url": video.get("s3_url", ""),
@@ -88,7 +96,6 @@ def get_video_metadata(video_id):
             "dislikes": video.get("dislikes", 0),
             "players": video.get("players", [])
         }
-        
         return jsonify(formatted_video), 200
     except Exception as e:
         logger.error(f"Error fetching video metadata: {e}")
@@ -789,9 +796,13 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
         except Exception as e:
             logger.error(f"Error parsing players JSON: {e}")
     
+    # Generate or use existing short_id
+    short_id = form_data.get('short_id') or generate_short_id()
+    
     # Create the metadata document
     metadata = {
         "_id": form_data.get('id', str(uuid.uuid4())),
+        "short_id": short_id,
         "title": form_data.get('title', os.path.basename(video_metadata.get('file_path', ''))),
         "description": form_data.get('description', ''),
         "s3_url": s3_url,
@@ -812,6 +823,11 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
     logger.info(f"Metadata saved to database with ID: {metadata['_id']}")
     
     return metadata
+
+def generate_short_id(length=8):
+    """Generate a short, unique, URL-safe ID."""
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choices(chars, k=length))
 
 @app.route('/upload/init', methods=['POST'])
 def init_chunked_upload():
@@ -995,7 +1011,7 @@ def finalize_upload():
         
         # Extract video metadata
         video_metadata = extract_video_metadata(complete_file_path)
-        
+
         # Save the thumbnail to GridFS and delete it locally
         thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
         
