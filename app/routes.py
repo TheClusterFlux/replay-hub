@@ -70,13 +70,16 @@ def get_metadata():
 
 @app.route('/metadata/<video_id>', methods=['GET'])
 def get_video_metadata(video_id):
-    """Retrieve metadata for a specific video by _id or short_id."""
+    """Retrieve metadata for a specific video by _id, short_id, or legacy UUID."""
     try:
-        # Try to find by _id first
+        # Try to find by _id (ObjectId or string)
         video = get_single_document({"_id": video_id})
         if not video:
             # Try to find by short_id
             video = get_single_document({"short_id": video_id})
+        if not video:
+            # Try to find by legacy UUID (32 or 36 char hex)
+            video = get_single_document({"uuid": video_id})
         if not video:
             return jsonify({"error": "Video not found"}), 404
         # Format the response to match API specs
@@ -105,7 +108,7 @@ def get_video_metadata(video_id):
 def increment_view_count(video_id):
     """Increment view count for a specific video."""
     try:
-        video = get_single_document({"_id": video_id})
+        video = get_single_document({"short_id": video_id})
         if not video:
             return jsonify({"success": False, "error": "Video not found"}), 404
             
