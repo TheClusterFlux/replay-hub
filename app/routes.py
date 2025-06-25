@@ -7,6 +7,7 @@ from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_d
 from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility, process_video_async
 from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
+from app.auth import auth_bp, jwt_required, optional_jwt
 import uuid
 import requests
 import datetime
@@ -14,6 +15,9 @@ import tempfile
 import shutil
 import random
 import string
+
+# Register authentication blueprint
+app.register_blueprint(auth_bp)
 
 # Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -146,6 +150,7 @@ def delete_metadata():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/upload', methods=['POST'])
+@jwt_required
 def upload_file():
     """Upload and save a video file."""
     try:
@@ -812,6 +817,21 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
     # Generate or use existing short_id
     short_id = form_data.get('short_id') or generate_short_id()
     
+    # Get uploader information from authenticated user or form data
+    uploader = form_data.get('uploader', 'Anonymous')
+    uploader_id = None
+    uploader_username = None
+    
+    # Check if user is authenticated (from request context)
+    if hasattr(request, 'current_user') and request.current_user:
+        user = request.current_user
+        uploader_id = user.id
+        uploader_username = user.username
+        uploader = user.display_name or user.username
+        logger.info(f"Video uploaded by authenticated user: {uploader_username}")
+    else:
+        logger.info("Video uploaded by anonymous user")
+    
     # Create the metadata document
     metadata = {
         "_id": form_data.get('id', str(uuid.uuid4())),
@@ -824,7 +844,9 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
         "duration": video_metadata.get('duration', 0),
         "resolution": video_metadata.get('resolution', ''),
         "upload_date": datetime.datetime.now().isoformat(),
-        "uploader": form_data.get('uploader', 'Anonymous'),
+        "uploader": uploader,
+        "uploader_id": uploader_id,  # Store authenticated user ID
+        "uploader_username": uploader_username,  # Store username for easy reference
         "views": 0,
         "likes": 0,
         "dislikes": 0,
@@ -843,6 +865,7 @@ def generate_short_id(length=8):
     return ''.join(random.choices(chars, k=length))
 
 @app.route('/upload/init', methods=['POST'])
+@jwt_required
 def init_chunked_upload():
     """Initialize a chunked upload session."""
     try:
@@ -894,6 +917,7 @@ def init_chunked_upload():
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
         
 @app.route('/upload/chunk', methods=['POST'])
+@jwt_required
 def upload_chunk():
     """Handle uploading individual chunks of a file."""
     try:
@@ -953,6 +977,7 @@ def upload_chunk():
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
         
 @app.route('/upload/finalize', methods=['POST'])
+@jwt_required
 def finalize_upload():
     """Finalize a chunked upload by combining all chunks and processing the complete file."""
     try:
