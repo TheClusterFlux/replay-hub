@@ -4,7 +4,7 @@ from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
 from app import app, logger
 from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document
-from app.utils import extract_video_metadata, schedule_delete
+from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility
 from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
 import uuid
@@ -157,7 +157,16 @@ def upload_file():
             # Validate and process the uploaded file
             file, file_path, internal_name, save_to_s3 = process_upload_request()
 
-        # Handle S3 or local saving
+        # Process video for web compatibility (convert H.265 to H.264 if needed)
+        logger.info(f"Processing video for web compatibility: {file_path}")
+        processed_file_path = process_video_for_web_compatibility(file_path)
+        
+        # Update the file path if conversion occurred
+        if processed_file_path != file_path:
+            logger.info(f"Video converted from H.265 to H.264: {processed_file_path}")
+            file_path = processed_file_path
+
+        # Handle S3 or local saving (using the processed file)
         s3_url = handle_file_storage(file, file_path, save_to_s3)
 
         # Extract video metadata
@@ -993,6 +1002,15 @@ def finalize_upload():
             
         # Now process the complete file similar to the regular upload endpoint
         save_to_s3 = True
+        
+        # Process video for web compatibility (convert H.265 to H.264 if needed)
+        logger.info(f"Processing chunked video for web compatibility: {complete_file_path}")
+        processed_file_path = process_video_for_web_compatibility(complete_file_path)
+        
+        # Update the file path if conversion occurred
+        if processed_file_path != complete_file_path:
+            logger.info(f"Chunked video converted from H.265 to H.264: {processed_file_path}")
+            complete_file_path = processed_file_path
         
         # Handle S3 or local saving
         s3_url = handle_file_storage(None, complete_file_path, save_to_s3)
