@@ -4,7 +4,7 @@ from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
 from app import app, logger
 from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document
-from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility
+from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility, process_video_async
 from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
 import uuid
@@ -23,7 +23,7 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024 * 1024  # 10GB in bytes
 
 # Set streaming threshold to handle large files without loading them into memory
-app.config['MAX_CONTENT_LENGTH_FOR_STREAMING'] = 1 * 1024 * 1024  # Use streaming for files larger than 1MB
+app.config['MAX_CONTENT_LENGTH_FOR_STREAMING'] = 10 * 1024 * 1024  # Use streaming for files larger than 10MB
 
 
 @app.route('/thumbnail/<thumbnail_id>', methods=['GET'])
@@ -179,6 +179,22 @@ def upload_file():
         combined_metadata = combine_and_save_metadata(
             video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
         )
+        
+        # Start async processing if we uploaded an H.265 file and it wasn't converted yet
+        # This handles the case where async processing is enabled
+        video_id = combined_metadata.get("_id")
+        if video_id and os.path.exists(file_path):
+            from app.utils import detect_video_codec, ASYNC_PROCESSING
+            if ASYNC_PROCESSING:
+                codec = detect_video_codec(file_path)
+                if codec in ['hevc', 'h265']:
+                    logger.info(f"Starting async H.265 processing for video {video_id}")
+                    
+                    # Create S3 re-upload callback
+                    def s3_reupload_callback(converted_path):
+                        return upload_to_s3(converted_path, content_type='video/mp4')
+                    
+                    process_video_async(file_path, video_id, s3_reupload_callback)
         
         # Now that all processing is done, schedule the local file for deletion
         if save_to_s3 and os.path.exists(file_path):
@@ -1033,6 +1049,21 @@ def finalize_upload():
         combined_metadata = combine_and_save_metadata(
             video_metadata, form_data, internal_name, thumbnail_id, s3_url
         )
+        
+        # Start async processing for chunked uploads too
+        video_id = combined_metadata.get("_id")
+        if video_id and os.path.exists(complete_file_path):
+            from app.utils import detect_video_codec, ASYNC_PROCESSING
+            if ASYNC_PROCESSING:
+                codec = detect_video_codec(complete_file_path)
+                if codec in ['hevc', 'h265']:
+                    logger.info(f"Starting async H.265 processing for chunked video {video_id}")
+                    
+                    # Create S3 re-upload callback
+                    def s3_reupload_callback(converted_path):
+                        return upload_to_s3(converted_path, content_type='video/mp4')
+                    
+                    process_video_async(complete_file_path, video_id, s3_reupload_callback)
         
         # Schedule deletion of the complete file now that processing is done
         if save_to_s3 and os.path.exists(complete_file_path):

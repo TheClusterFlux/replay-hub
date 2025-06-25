@@ -4,11 +4,21 @@ import mimetypes
 from botocore.exceptions import ClientError
 from app.config import AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME, S3_REGION
 import logging
+import threading
+from boto3.s3.transfer import TransferConfig
 
 # Configure logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# S3 Transfer configuration for better performance
+MB = 1024 * 1024
+transfer_config = TransferConfig(
+    multipart_threshold=64 * MB,  # Use multipart for files larger than 64MB
+    max_concurrency=10,           # Use up to 10 threads for concurrent uploads
+    multipart_chunksize=64 * MB,  # 64MB per chunk
+    use_threads=True              # Enable threading
+)
 
 def upload_to_s3(file_path, object_name=None, content_type=None):
     """Upload a file to an S3 bucket and return the URL
@@ -29,6 +39,10 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
     if not os.path.exists(file_path):
         logger.error(f"File does not exist: {file_path}")
         return None
+
+    # Get file size for logging
+    file_size = os.path.getsize(file_path)
+    logger.info(f"File size: {file_size // MB}MB")
 
     # Determine the file's content type if not provided
     if content_type is None:
@@ -64,13 +78,18 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
             'CacheControl': 'max-age=31536000'  # Cache for 1 year as per requirements
         }
         
-        # Upload the file
+        # Upload the file with optimized transfer configuration
         logger.info(f"Uploading file to S3 bucket: {S3_BUCKET_NAME}, Object name: {object_name}")
+        
+        if file_size > 64 * MB:
+            logger.info(f"Large file detected ({file_size // MB}MB), using multipart upload")
+        
         s3_client.upload_file(
             file_path, 
             S3_BUCKET_NAME, 
             object_name,
-            ExtraArgs=extra_args
+            ExtraArgs=extra_args,
+            Config=transfer_config
         )
         logger.info(f"File uploaded successfully to bucket: {S3_BUCKET_NAME}, Object name: {object_name}")
 
@@ -86,6 +105,29 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
         logger.error(f"Unexpected error during S3 upload: {e}")
         return None
 
+def upload_to_s3_async(file_path, object_name=None, content_type=None, callback=None):
+    """
+    Upload a file to S3 asynchronously in a background thread.
+    
+    :param file_path: File to upload
+    :param object_name: S3 object name
+    :param content_type: Content type
+    :param callback: Function to call with result (url or None)
+    """
+    def async_upload():
+        try:
+            result_url = upload_to_s3(file_path, object_name, content_type)
+            if callback:
+                callback(result_url)
+        except Exception as e:
+            logger.error(f"Error in async S3 upload: {e}")
+            if callback:
+                callback(None)
+    
+    thread = threading.Thread(target=async_upload)
+    thread.daemon = True
+    thread.start()
+    logger.info(f"Started async S3 upload thread for: {file_path}")
 
 def get_content_type(file_path):
     """Determine the content type of a file based on its extension.

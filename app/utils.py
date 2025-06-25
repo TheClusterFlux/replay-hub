@@ -10,9 +10,11 @@ from app import logger
 
 # Configuration
 ENABLE_VIDEO_CONVERSION = os.getenv('ENABLE_VIDEO_CONVERSION', 'true').lower() == 'true'
-CONVERSION_QUALITY = int(os.getenv('CONVERSION_QUALITY', '23'))  # CRF value
-CONVERSION_PRESET = os.getenv('CONVERSION_PRESET', 'fast')  # fast, medium, slow
+CONVERSION_QUALITY = int(os.getenv('CONVERSION_QUALITY', '18'))  # CRF value (18 = visually lossless)
+CONVERSION_PRESET = os.getenv('CONVERSION_PRESET', 'slow')  # slow preset for best quality
 MAX_CONVERSION_TIME = int(os.getenv('MAX_CONVERSION_TIME', '36000'))  # seconds
+ASYNC_PROCESSING = os.getenv('ASYNC_PROCESSING', 'true').lower() == 'true'
+LOSSLESS_MODE = os.getenv('LOSSLESS_MODE', 'true').lower() == 'true'  # True lossless encoding
 
 def extract_video_metadata(file_path):
     """Extract metadata from a video file."""
@@ -105,7 +107,7 @@ def get_video_info(file_path):
         return None
 
 def convert_h265_to_h264(input_path):
-    """Convert H.265/HEVC video to H.264 for browser compatibility."""
+    """Convert H.265/HEVC video to H.264 for browser compatibility with maximum quality preservation."""
     try:
         if not check_ffmpeg_available():
             logger.error("FFmpeg not available - cannot convert video")
@@ -127,23 +129,31 @@ def convert_h265_to_h264(input_path):
             counter += 1
         
         logger.info(f"Converting H.265 to H.264: {input_path} -> {output_path}")
-        logger.info(f"Using conversion settings - Quality: CRF {CONVERSION_QUALITY}, Preset: {CONVERSION_PRESET}")
+        
+        # Determine quality settings based on mode
+        if LOSSLESS_MODE:
+            logger.info("Using LOSSLESS mode - true lossless H.264 encoding")
+            quality_settings = ['-c:v', 'libx264', '-preset', 'veryslow', '-qp', '0']  # Lossless
+        else:
+            logger.info(f"Using high-quality mode - CRF {CONVERSION_QUALITY}, Preset: {CONVERSION_PRESET}")
+            quality_settings = ['-c:v', 'libx264', '-preset', CONVERSION_PRESET, '-crf', str(CONVERSION_QUALITY)]
         
         # Get input file size for logging
         input_size = os.path.getsize(input_path)
         logger.info(f"Input file size: {input_size // 1024 // 1024}MB")
         
-        # FFmpeg command for H.265 to H.264 conversion
+        # FFmpeg command for H.265 to H.264 conversion with maximum quality
         cmd = [
             'ffmpeg', '-i', input_path,
-            '-c:v', 'libx264',           # H.264 video codec
-            '-c:a', 'copy',              # Copy audio without re-encoding
-            '-preset', CONVERSION_PRESET, # Configurable encoding preset
-            '-crf', str(CONVERSION_QUALITY), # Configurable quality setting
-            '-movflags', '+faststart',   # Optimize for web streaming
-            '-y',                        # Overwrite output file
+            *quality_settings,              # Quality settings (lossless or high-quality)
+            '-c:a', 'copy',                 # Copy audio without re-encoding
+            '-movflags', '+faststart',      # Optimize for web streaming
+            '-y',                           # Overwrite output file
             output_path
         ]
+        
+        # Log the exact command for transparency
+        logger.info(f"FFmpeg command: {' '.join(cmd)}")
         
         # Run conversion with configurable timeout
         logger.info("Starting H.265 to H.264 conversion...")
@@ -162,7 +172,12 @@ def convert_h265_to_h264(input_path):
                 
                 logger.info(f"Conversion complete - Original: {original_size//1024//1024}MB, "
                            f"Converted: {converted_size//1024//1024}MB, "
-                           f"Change: {size_change_pct:.1f}%")
+                           f"Change: {size_change_pct:+.1f}%")
+                
+                if LOSSLESS_MODE:
+                    logger.info("Lossless conversion completed - no quality loss")
+                else:
+                    logger.info(f"High-quality conversion completed - CRF {CONVERSION_QUALITY} (visually lossless)")
                 
                 return output_path
             else:
@@ -187,11 +202,49 @@ def convert_h265_to_h264(input_path):
         logger.error(f"Error converting video {input_path}: {e}")
         return None
 
-def process_video_for_web_compatibility(file_path):
+def process_video_async(file_path, video_id, s3_upload_callback=None):
     """
-    Process uploaded video to ensure web browser compatibility.
-    Converts H.265/HEVC to H.264 if needed.
-    Returns the path to the processed (web-compatible) video.
+    Process video asynchronously in background thread.
+    This allows upload response to return immediately.
+    """
+    def async_processing():
+        try:
+            logger.info(f"Starting async video processing for {video_id}: {file_path}")
+            
+            # Process video for web compatibility
+            processed_path = process_video_for_web_compatibility_sync(file_path)
+            
+            if processed_path != file_path:
+                logger.info(f"Async processing completed conversion: {processed_path}")
+                
+                # If we have a callback for S3 re-upload, call it
+                if s3_upload_callback:
+                    try:
+                        new_s3_url = s3_upload_callback(processed_path)
+                        if new_s3_url:
+                            logger.info(f"Async S3 re-upload completed: {new_s3_url}")
+                            
+                            # Update database with new S3 URL
+                            from app.database import update_db
+                            update_db({"_id": video_id}, {"$set": {"s3_url": new_s3_url}})
+                            logger.info(f"Database updated with new S3 URL for {video_id}")
+                    except Exception as e:
+                        logger.error(f"Error in async S3 re-upload: {e}")
+                        
+            logger.info(f"Async video processing completed for {video_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in async video processing for {video_id}: {e}")
+    
+    # Start background thread
+    thread = threading.Thread(target=async_processing)
+    thread.daemon = True
+    thread.start()
+    logger.info(f"Started async video processing thread for {video_id}")
+
+def process_video_for_web_compatibility_sync(file_path):
+    """
+    Synchronous version of video processing (for async use).
     """
     try:
         # Check if video conversion is enabled
@@ -256,6 +309,43 @@ def process_video_for_web_compatibility(file_path):
         logger.error(f"Error processing video for web compatibility: {e}")
         return file_path  # Return original file if processing fails
 
+def process_video_for_web_compatibility(file_path):
+    """
+    Process uploaded video to ensure web browser compatibility.
+    Converts H.265/HEVC to H.264 if needed.
+    Returns the path to the processed (web-compatible) video.
+    
+    If ASYNC_PROCESSING is enabled, this will check codec quickly and return
+    the original file, with conversion happening in background.
+    """
+    try:
+        # Check if video conversion is enabled
+        if not ENABLE_VIDEO_CONVERSION:
+            logger.info("Video conversion is disabled (ENABLE_VIDEO_CONVERSION=false)")
+            return file_path
+        
+        # Validate input
+        if not file_path or not os.path.exists(file_path):
+            logger.error(f"Invalid file path for web compatibility processing: {file_path}")
+            return file_path
+        
+        # Quick codec detection
+        codec = detect_video_codec(file_path)
+        logger.info(f"Video codec detection result: {codec}")
+        
+        # If async processing is enabled and we detect H.265, return original file
+        # and let async processing handle conversion
+        if ASYNC_PROCESSING and codec in ['hevc', 'h265']:
+            logger.info(f"H.265 detected, async processing enabled - returning original file for fast upload")
+            return file_path
+        
+        # For non-async or non-H.265 files, use synchronous processing
+        return process_video_for_web_compatibility_sync(file_path)
+            
+    except Exception as e:
+        logger.error(f"Error processing video for web compatibility: {e}")
+        return file_path  # Return original file if processing fails
+
 def schedule_delete(file_path, delay):
     """Schedule a file for deletion after a delay using a background thread."""
     def delete_after_delay(path, wait_time):
@@ -285,6 +375,13 @@ def schedule_delete(file_path, delay):
 # Log configuration on module load
 logger.info(f"Video processing configuration:")
 logger.info(f"  ENABLE_VIDEO_CONVERSION: {ENABLE_VIDEO_CONVERSION}")
+logger.info(f"  ASYNC_PROCESSING: {ASYNC_PROCESSING}")
+logger.info(f"  LOSSLESS_MODE: {LOSSLESS_MODE}")
 logger.info(f"  CONVERSION_QUALITY (CRF): {CONVERSION_QUALITY}")
 logger.info(f"  CONVERSION_PRESET: {CONVERSION_PRESET}")
 logger.info(f"  MAX_CONVERSION_TIME: {MAX_CONVERSION_TIME}s")
+
+if LOSSLESS_MODE:
+    logger.info("🎯 TRUE LOSSLESS MODE ENABLED - Zero quality loss guaranteed")
+else:
+    logger.info(f"🎯 HIGH QUALITY MODE - CRF {CONVERSION_QUALITY} (visually lossless)")
