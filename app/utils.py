@@ -8,6 +8,16 @@ import shutil
 from moviepy.editor import VideoFileClip
 from app import logger
 
+def allowed_file(filename):
+    """Check if the uploaded file has an allowed extension."""
+    ALLOWED_EXTENSIONS = {
+        # Video files
+        'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv', 'm4v', '3gp',
+        # Image files (for profile pictures)
+        'png', 'jpg', 'jpeg', 'gif', 'webp'
+    }
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 # Configuration
 ENABLE_VIDEO_CONVERSION = os.getenv('ENABLE_VIDEO_CONVERSION', 'true').lower() == 'true'
 CONVERSION_QUALITY = int(os.getenv('CONVERSION_QUALITY', '18'))  # CRF value (18 = visually lossless)

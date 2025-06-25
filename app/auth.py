@@ -4,7 +4,8 @@ import jwt
 from datetime import datetime, timedelta
 import os
 from .models import User
-from .utils import allowed_file, upload_to_s3
+from .utils import allowed_file
+from .s3 import upload_to_s3
 import tempfile
 
 # Create authentication blueprint

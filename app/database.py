@@ -21,6 +21,10 @@ reactions_collection = db.reactions
 logger.info(f"Using collection: {'test_data' if IS_LOCAL else 'prod_data'}")
 logger.info("Initialized comments and reactions collections")
 
+def get_db():
+    """Get the database instance for direct access."""
+    return db
+
 # Database utility functions
 def save_to_db(data):
     """Save data to MongoDB."""

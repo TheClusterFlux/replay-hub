@@ -16,8 +16,7 @@ import shutil
 import random
 import string
 
-# Register authentication blueprint
-app.register_blueprint(auth_bp)
+# Authentication blueprint is registered in __init__.py
 
 # Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -40,9 +39,17 @@ def get_thumbnail(thumbnail_id):
         logger.error(f"Error fetching thumbnail: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/metadata', methods=['GET'])
+@app.route('/metadata', methods=['GET', 'OPTIONS'])
 def get_metadata():
     """Retrieve metadata from MongoDB."""
+    # Handle preflight requests
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+    
     try:
         filters = request.args.to_dict()
         metadata = fetch_from_db(filters)
@@ -67,10 +74,18 @@ def get_metadata():
             }
             formatted_metadata.append(formatted_item)
         logger.info(f"Fetched metadata: {formatted_metadata}")
-        return jsonify(formatted_metadata), 200
+        response = jsonify(formatted_metadata)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response, 200
     except Exception as e:
         logger.error(f"Error fetching metadata: {e}")
-        return jsonify({"error": str(e)}), 500
+        response = jsonify({"error": str(e)})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response, 500
 
 @app.route('/metadata/<video_id>', methods=['GET'])
 def get_video_metadata(video_id):
