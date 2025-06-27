@@ -656,6 +656,425 @@ def upload_thumbnail(video_id):
         logger.error(f"Error uploading thumbnail: {e}")
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
 
+
+@app.route('/api/user/saved-videos', methods=['POST'])
+@jwt_required
+def save_video():
+    """Save or unsave a video for the current user."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        video_id = data.get('videoId')
+        timestamp = data.get('timestamp', datetime.datetime.now().isoformat())
+        
+        if not video_id:
+            return jsonify({"error": "Video ID is required"}), 400
+        
+        # Check if video exists
+        video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+        if not video:
+            return jsonify({"error": "Video not found"}), 404
+        
+        # Get saved videos collection
+        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        
+        # Check if video is already saved by this user
+        existing_save = saved_videos_collection.find_one({
+            "userId": current_user_id,
+            "videoId": video_id
+        })
+        
+        if existing_save:
+            # Video is already saved - remove it (unsave)
+            saved_videos_collection.delete_one({"_id": existing_save["_id"]})
+            saved = False
+            message = "Video removed from your watchlist"
+        else:
+            # Save the video
+            save_data = {
+                "_id": str(uuid.uuid4()),
+                "userId": current_user_id,
+                "videoId": video_id,
+                "timestamp": timestamp
+            }
+            saved_videos_collection.insert_one(save_data)
+            saved = True
+            message = "Video saved to your watchlist"
+        
+        logger.info(f"User {current_user_id} {'saved' if saved else 'unsaved'} video {video_id}")
+        
+        return jsonify({
+            "success": True,
+            "saved": saved,
+            "message": message,
+            "videoId": video_id,
+            "userId": current_user_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error saving/unsaving video: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/user/saved-videos/<video_id>', methods=['GET'])
+@jwt_required
+def get_video_save_status(video_id):
+    """Check if a video is saved by the current user."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        
+        # Get saved videos collection
+        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        
+        # Check if video is saved by this user
+        existing_save = saved_videos_collection.find_one({
+            "userId": current_user_id,
+            "videoId": video_id
+        })
+        
+        return jsonify({
+            "success": True,
+            "saved": existing_save is not None,
+            "videoId": video_id,
+            "userId": current_user_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error checking video save status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/user/saved-videos', methods=['GET'])
+@jwt_required
+def get_saved_videos():
+    """Get all videos saved by the current user."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        
+        # Get saved videos collection
+        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        
+        # Get all saved videos for this user
+        saved_videos = list(saved_videos_collection.find({
+            "userId": current_user_id
+        }).sort("timestamp", -1))  # Most recent first
+        
+        # Get full video details for each saved video
+        video_details = []
+        for saved_video in saved_videos:
+            video_id = saved_video['videoId']
+            video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+            
+            if video:
+                formatted_video = {
+                    "id": video.get("_id", video_id),
+                    "short_id": video.get("short_id", ""),
+                    "title": video.get("title", ""),
+                    "description": video.get("description", ""),
+                    "s3_url": video.get("s3_url", ""),
+                    "thumbnail_id": video.get("thumbnail_id", ""),
+                    "duration": video.get("duration", 0),
+                    "resolution": video.get("resolution", ""),
+                    "upload_date": video.get("upload_date", datetime.datetime.now().isoformat()),
+                    "uploader": video.get("uploader", "Anonymous"),
+                    "views": video.get("views", 0),
+                    "likes": video.get("likes", 0),
+                    "dislikes": video.get("dislikes", 0),
+                    "players": video.get("players", []),
+                    "saved_timestamp": saved_video.get("timestamp")
+                }
+                video_details.append(formatted_video)
+        
+        return jsonify({
+            "success": True,
+            "videos": video_details,
+            "count": len(video_details),
+            "userId": current_user_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting saved videos: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/videos/<video_id>', methods=['PUT'])
+@jwt_required
+def update_video(video_id):
+    """Update video metadata for the video owner."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        # Find the video
+        video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+        if not video:
+            return jsonify({"error": "Video not found"}), 404
+        
+        # Check if current user is the owner
+        video_uploader_id = video.get('user_id')  # If we store user IDs
+        video_uploader_name = video.get('uploader')  # If we store usernames
+        
+        # Get current user details for comparison
+        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        current_user = users_collection.find_one({"_id": current_user_id})
+        
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Check ownership
+        is_owner = (
+            video_uploader_id == current_user_id or
+            video_uploader_name == current_user.get('username') or
+            video_uploader_name == current_user.get('display_name')
+        )
+        
+        if not is_owner:
+            return jsonify({"error": "You can only edit your own videos"}), 403
+        
+        # Update allowed fields
+        allowed_fields = ['title', 'description', 'players']
+        update_data = {}
+        
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        if not update_data:
+            return jsonify({"error": "No valid fields to update"}), 400
+        
+        # Update the video
+        actual_id = video.get("_id")
+        update_db({"_id": actual_id}, {"$set": update_data})
+        
+        logger.info(f"User {current_user_id} updated video {video_id} with fields: {list(update_data.keys())}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Video updated successfully",
+            "videoId": actual_id,
+            "updatedFields": list(update_data.keys())
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error updating video: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/videos/<video_id>', methods=['DELETE'])
+@jwt_required
+def delete_video(video_id):
+    """Delete a video and all associated data."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        
+        # Find the video
+        video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+        if not video:
+            return jsonify({"error": "Video not found"}), 404
+        
+        # Check if current user is the owner
+        video_uploader_id = video.get('user_id')
+        video_uploader_name = video.get('uploader')
+        
+        # Get current user details for comparison
+        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        current_user = users_collection.find_one({"_id": current_user_id})
+        
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Check ownership
+        is_owner = (
+            video_uploader_id == current_user_id or
+            video_uploader_name == current_user.get('username') or
+            video_uploader_name == current_user.get('display_name')
+        )
+        
+        if not is_owner:
+            return jsonify({"error": "You can only delete your own videos"}), 403
+        
+        actual_id = video.get("_id")
+        
+        # Delete associated data
+        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
+        reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['reactions']
+        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
+        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        
+        # Delete comments and their reactions
+        comments = comments_collection.find({"videoId": actual_id})
+        for comment in comments:
+            comment_reactions_collection.delete_many({"commentId": comment["_id"]})
+        comments_collection.delete_many({"videoId": actual_id})
+        
+        # Delete video reactions
+        reactions_collection.delete_many({"videoId": actual_id})
+        
+        # Delete saved video references
+        saved_videos_collection.delete_many({"videoId": actual_id})
+        
+        # Delete thumbnail from GridFS if it exists
+        thumbnail_id = video.get('thumbnail_id')
+        if thumbnail_id:
+            try:
+                fs.delete(ObjectId(thumbnail_id))
+            except Exception as e:
+                logger.warning(f"Could not delete thumbnail {thumbnail_id}: {e}")
+        
+        # Delete video metadata
+        delete_from_db({"_id": actual_id})
+        
+        # TODO: Delete video file from S3 if needed
+        # s3_url = video.get('s3_url')
+        # if s3_url:
+        #     delete_from_s3(s3_url)
+        
+        logger.info(f"User {current_user_id} deleted video {video_id}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Video deleted successfully",
+            "videoId": actual_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting video: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/comments/<comment_id>', methods=['DELETE'])
+@jwt_required
+def delete_comment(comment_id):
+    """Delete a comment (only by video owner)."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        
+        # Get the comment
+        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
+        comment = comments_collection.find_one({"_id": comment_id})
+        
+        if not comment:
+            return jsonify({"error": "Comment not found"}), 404
+        
+        # Get the video to check ownership
+        video_id = comment.get('videoId')
+        video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+        
+        if not video:
+            return jsonify({"error": "Video not found"}), 404
+        
+        # Check if current user is the video owner
+        video_uploader_id = video.get('user_id')
+        video_uploader_name = video.get('uploader')
+        
+        # Get current user details for comparison
+        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        current_user = users_collection.find_one({"_id": current_user_id})
+        
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Check ownership
+        is_video_owner = (
+            video_uploader_id == current_user_id or
+            video_uploader_name == current_user.get('username') or
+            video_uploader_name == current_user.get('display_name')
+        )
+        
+        if not is_video_owner:
+            return jsonify({"error": "Only video owners can delete comments"}), 403
+        
+        # Delete comment reactions
+        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
+        comment_reactions_collection.delete_many({"commentId": comment_id})
+        
+        # Delete replies to this comment
+        comments_collection.delete_many({"parentId": comment_id})
+        
+        # Delete the comment
+        comments_collection.delete_one({"_id": comment_id})
+        
+        logger.info(f"Video owner {current_user_id} deleted comment {comment_id}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Comment deleted successfully",
+            "commentId": comment_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting comment: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/replies/<reply_id>', methods=['DELETE'])
+@jwt_required
+def delete_reply(reply_id):
+    """Delete a reply (only by video owner)."""
+    try:
+        current_user_id = request.current_user_id  # Set by @jwt_required decorator
+        
+        # Get the reply
+        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
+        reply = comments_collection.find_one({"_id": reply_id})
+        
+        if not reply:
+            return jsonify({"error": "Reply not found"}), 404
+        
+        # Get the video to check ownership
+        video_id = reply.get('videoId')
+        video = get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+        
+        if not video:
+            return jsonify({"error": "Video not found"}), 404
+        
+        # Check if current user is the video owner
+        video_uploader_id = video.get('user_id')
+        video_uploader_name = video.get('uploader')
+        
+        # Get current user details for comparison
+        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        current_user = users_collection.find_one({"_id": current_user_id})
+        
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+        
+        # Check ownership
+        is_video_owner = (
+            video_uploader_id == current_user_id or
+            video_uploader_name == current_user.get('username') or
+            video_uploader_name == current_user.get('display_name')
+        )
+        
+        if not is_video_owner:
+            return jsonify({"error": "Only video owners can delete replies"}), 403
+        
+        # Delete reply reactions
+        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
+        comment_reactions_collection.delete_many({"commentId": reply_id})
+        
+        # Delete the reply
+        comments_collection.delete_one({"_id": reply_id})
+        
+        logger.info(f"Video owner {current_user_id} deleted reply {reply_id}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Reply deleted successfully",
+            "replyId": reply_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting reply: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # Keep the existing code for process_upload_request, handle_file_storage, etc.
 
 def process_url_request(url):
