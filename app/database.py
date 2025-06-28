@@ -44,24 +44,30 @@ def get_single_document(query):
     """Fetch a single document from MongoDB."""
     logger.info(f"Fetching single document with query: {query}")
     query_copy = dict(query)
-    # Convert string _id to ObjectId if needed and looks like a MongoDB ObjectID
+    
+    # Handle _id queries - try both string and ObjectId formats
     if '_id' in query_copy and isinstance(query_copy['_id'], str):
+        # First try with string ID (for UUIDs)
         doc = collection.find_one({'_id': query_copy['_id']})
         if doc:
             if '_id' in doc:
                 doc['_id'] = str(doc['_id'])
+            logger.info(f"Found document with string _id: {doc}")
             return doc
+        
+        # Then try converting to ObjectId (for MongoDB ObjectIds)
         try:
             query_copy['_id'] = ObjectId(query_copy['_id'])
+            doc = collection.find_one(query_copy)
+            if doc:
+                if '_id' in doc:
+                    doc['_id'] = str(doc['_id'])
+                logger.info(f"Found document with ObjectId _id: {doc}")
+                return doc
         except:
-            logger.info(f"Could not convert _id to ObjectId, using as string: {query_copy['_id']}")
-            return None
-    # If searching by short_id, allow direct string match
-    if 'short_id' in query_copy:
-        doc = collection.find_one({'short_id': query_copy['short_id']})
-        if doc and '_id' in doc:
-            doc['_id'] = str(doc['_id'])
-        return doc
+            logger.info(f"Could not convert _id to ObjectId: {query_copy['_id']}")
+    
+    # Handle other queries (including short_id)
     doc = collection.find_one(query_copy)
     if doc and '_id' in doc:
         doc['_id'] = str(doc['_id'])
@@ -72,15 +78,26 @@ def update_db(query, update):
     """Update documents in MongoDB."""
     logger.info(f"Updating documents with query: {query}, update: {update}")
     
-    # Convert string _id to ObjectId if needed
-    if '_id' in query and isinstance(query['_id'], str):
+    # Handle string _id - try as string first, then as ObjectId if needed
+    query_copy = dict(query)
+    if '_id' in query_copy and isinstance(query_copy['_id'], str):
+        # First try with string ID (for UUIDs)
+        result = collection.update_one(query_copy, update)
+        if result.matched_count > 0:
+            logger.info(f"Updated {result.modified_count} documents with string _id")
+            return result.modified_count
+        
+        # If no match, try converting to ObjectId
         try:
-            query['_id'] = ObjectId(query['_id'])
+            query_copy['_id'] = ObjectId(query_copy['_id'])
+            result = collection.update_one(query_copy, update)
+            logger.info(f"Updated {result.modified_count} documents with ObjectId _id")
+            return result.modified_count
         except:
-            # If conversion fails, keep it as is (might be a custom ID)
-            pass
-            
-    result = collection.update_one(query, update)
+            logger.info(f"Could not convert _id to ObjectId: {query['_id']}")
+            return 0
+    
+    result = collection.update_one(query_copy, update)
     logger.info(f"Updated {result.modified_count} documents")
     return result.modified_count
 
