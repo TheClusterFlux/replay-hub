@@ -827,7 +827,11 @@ def update_video(video_id):
         # Get current user details for comparison using the correct database connection
         db = get_db()
         users_collection = db['users']
-        current_user = users_collection.find_one({"_id": current_user_id})
+        try:
+            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
+        except Exception as e:
+            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
+            return jsonify({"error": "Invalid user ID"}), 400
         
         if not current_user:
             return jsonify({"error": "User not found"}), 404
@@ -890,7 +894,11 @@ def delete_video(video_id):
         # Get current user details for comparison using the correct database connection
         db = get_db()
         users_collection = db['users']
-        current_user = users_collection.find_one({"_id": current_user_id})
+        try:
+            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
+        except Exception as e:
+            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
+            return jsonify({"error": "Invalid user ID"}), 400
         
         if not current_user:
             return jsonify({"error": "User not found"}), 404
@@ -982,7 +990,11 @@ def delete_comment(comment_id):
         
         # Get current user details for comparison using the correct database connection
         users_collection = db['users']
-        current_user = users_collection.find_one({"_id": current_user_id})
+        try:
+            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
+        except Exception as e:
+            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
+            return jsonify({"error": "Invalid user ID"}), 400
         
         if not current_user:
             return jsonify({"error": "User not found"}), 404
@@ -1048,7 +1060,11 @@ def delete_reply(reply_id):
         
         # Get current user details for comparison using the correct database connection
         users_collection = db['users']
-        current_user = users_collection.find_one({"_id": current_user_id})
+        try:
+            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
+        except Exception as e:
+            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
+            return jsonify({"error": "Invalid user ID"}), 400
         
         if not current_user:
             return jsonify({"error": "User not found"}), 404

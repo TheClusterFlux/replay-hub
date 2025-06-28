@@ -171,12 +171,28 @@ class User:
         """Get user by ID"""
         try:
             db = get_db()
-            user_doc = db.users.find_one({'_id': ObjectId(user_id)})
+            
+            # Handle both ObjectId objects and ObjectId strings
+            if isinstance(user_id, ObjectId):
+                query_id = user_id
+            elif isinstance(user_id, str):
+                try:
+                    query_id = ObjectId(user_id)
+                except Exception as e:
+                    current_app.logger.error(f"Invalid ObjectId format: {user_id}, error: {e}")
+                    return None
+            else:
+                current_app.logger.error(f"Invalid user_id type: {type(user_id)}")
+                return None
+            
+            user_doc = db.users.find_one({'_id': query_id})
             if user_doc:
                 return User.from_dict(user_doc)
+            
+            current_app.logger.warning(f"User not found with ID: {user_id}")
             return None
         except Exception as e:
-            current_app.logger.error(f"Error getting user by ID: {e}")
+            current_app.logger.error(f"Error getting user by ID {user_id}: {e}")
             return None
     
     @staticmethod
