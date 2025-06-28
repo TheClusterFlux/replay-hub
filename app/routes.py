@@ -3,7 +3,7 @@ import threading
 from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
 from app import app, logger
-from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document
+from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document, get_db
 from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility, process_video_async
 from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
@@ -679,8 +679,9 @@ def save_video():
         if not video:
             return jsonify({"error": "Video not found"}), 404
         
-        # Get saved videos collection
-        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        # Get saved videos collection using the correct database connection
+        db = get_db()
+        saved_videos_collection = db['saved_videos']
         
         # Check if video is already saved by this user
         existing_save = saved_videos_collection.find_one({
@@ -727,8 +728,9 @@ def get_video_save_status(video_id):
     try:
         current_user_id = request.current_user_id  # Set by @jwt_required decorator
         
-        # Get saved videos collection
-        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        # Get saved videos collection using the correct database connection
+        db = get_db()
+        saved_videos_collection = db['saved_videos']
         
         # Check if video is saved by this user
         existing_save = saved_videos_collection.find_one({
@@ -755,8 +757,9 @@ def get_saved_videos():
     try:
         current_user_id = request.current_user_id  # Set by @jwt_required decorator
         
-        # Get saved videos collection
-        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        # Get saved videos collection using the correct database connection
+        db = get_db()
+        saved_videos_collection = db['saved_videos']
         
         # Get all saved videos for this user
         saved_videos = list(saved_videos_collection.find({
@@ -821,8 +824,9 @@ def update_video(video_id):
         video_uploader_id = video.get('user_id')  # If we store user IDs
         video_uploader_name = video.get('uploader')  # If we store usernames
         
-        # Get current user details for comparison
-        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        # Get current user details for comparison using the correct database connection
+        db = get_db()
+        users_collection = db['users']
         current_user = users_collection.find_one({"_id": current_user_id})
         
         if not current_user:
@@ -883,8 +887,9 @@ def delete_video(video_id):
         video_uploader_id = video.get('user_id')
         video_uploader_name = video.get('uploader')
         
-        # Get current user details for comparison
-        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        # Get current user details for comparison using the correct database connection
+        db = get_db()
+        users_collection = db['users']
         current_user = users_collection.find_one({"_id": current_user_id})
         
         if not current_user:
@@ -902,11 +907,11 @@ def delete_video(video_id):
         
         actual_id = video.get("_id")
         
-        # Delete associated data
-        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
-        reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['reactions']
-        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
-        saved_videos_collection = app.mongo_client[app.config['DATABASE_NAME']]['saved_videos']
+        # Delete associated data using the correct database connection
+        comments_collection = db['comments']
+        reactions_collection = db['reactions']
+        comment_reactions_collection = db['comment_reactions']
+        saved_videos_collection = db['saved_videos']
         
         # Delete comments and their reactions
         comments = comments_collection.find({"videoId": actual_id})
@@ -956,8 +961,9 @@ def delete_comment(comment_id):
     try:
         current_user_id = request.current_user_id  # Set by @jwt_required decorator
         
-        # Get the comment
-        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
+        # Get the comment using the correct database connection
+        db = get_db()
+        comments_collection = db['comments']
         comment = comments_collection.find_one({"_id": comment_id})
         
         if not comment:
@@ -974,8 +980,8 @@ def delete_comment(comment_id):
         video_uploader_id = video.get('user_id')
         video_uploader_name = video.get('uploader')
         
-        # Get current user details for comparison
-        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        # Get current user details for comparison using the correct database connection
+        users_collection = db['users']
         current_user = users_collection.find_one({"_id": current_user_id})
         
         if not current_user:
@@ -991,8 +997,8 @@ def delete_comment(comment_id):
         if not is_video_owner:
             return jsonify({"error": "Only video owners can delete comments"}), 403
         
-        # Delete comment reactions
-        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
+        # Delete comment reactions using the correct database connection
+        comment_reactions_collection = db['comment_reactions']
         comment_reactions_collection.delete_many({"commentId": comment_id})
         
         # Delete replies to this comment
@@ -1021,8 +1027,9 @@ def delete_reply(reply_id):
     try:
         current_user_id = request.current_user_id  # Set by @jwt_required decorator
         
-        # Get the reply
-        comments_collection = app.mongo_client[app.config['DATABASE_NAME']]['comments']
+        # Get the reply using the correct database connection
+        db = get_db()
+        comments_collection = db['comments']
         reply = comments_collection.find_one({"_id": reply_id})
         
         if not reply:
@@ -1039,8 +1046,8 @@ def delete_reply(reply_id):
         video_uploader_id = video.get('user_id')
         video_uploader_name = video.get('uploader')
         
-        # Get current user details for comparison
-        users_collection = app.mongo_client[app.config['DATABASE_NAME']]['users']
+        # Get current user details for comparison using the correct database connection
+        users_collection = db['users']
         current_user = users_collection.find_one({"_id": current_user_id})
         
         if not current_user:
@@ -1056,8 +1063,8 @@ def delete_reply(reply_id):
         if not is_video_owner:
             return jsonify({"error": "Only video owners can delete replies"}), 403
         
-        # Delete reply reactions
-        comment_reactions_collection = app.mongo_client[app.config['DATABASE_NAME']]['comment_reactions']
+        # Delete reply reactions using the correct database connection
+        comment_reactions_collection = db['comment_reactions']
         comment_reactions_collection.delete_many({"commentId": reply_id})
         
         # Delete the reply
