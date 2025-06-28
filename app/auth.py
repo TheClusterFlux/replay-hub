@@ -33,12 +33,17 @@ def jwt_required(f):
             current_user = User.get_by_id(current_user_id)
             if not current_user:
                 return jsonify({'error': 'Invalid token - user not found'}), 401
+            
+            # Set current_user_id on request object for routes to access
+            request.current_user_id = current_user_id
+            request.current_user = current_user
+            
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token has expired'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'error': 'Invalid token'}), 401
         
-        return f(current_user, *args, **kwargs)
+        return f(*args, **kwargs)
     
     return decorated
 
@@ -175,15 +180,17 @@ def logout():
 
 @auth_bp.route('/api/auth/me', methods=['GET'])
 @jwt_required
-def get_profile(current_user):
+def get_profile():
     """Get current user profile"""
+    current_user = request.current_user
     return jsonify({'user': current_user.to_dict()}), 200
 
 @auth_bp.route('/api/auth/me', methods=['PUT'])
 @jwt_required
-def update_profile(current_user):
+def update_profile():
     """Update current user profile"""
     try:
+        current_user = request.current_user
         # Handle multipart form data (for profile picture)
         first_name = request.form.get('first_name', current_user.first_name)
         last_name = request.form.get('last_name', current_user.last_name)
@@ -233,9 +240,10 @@ def update_profile(current_user):
 
 @auth_bp.route('/api/auth/change-password', methods=['POST'])
 @jwt_required
-def change_password(current_user):
+def change_password():
     """Change user password"""
     try:
+        current_user = request.current_user
         data = request.get_json()
         if not data:
             return jsonify({'error': 'Request data is required'}), 400
