@@ -15,6 +15,7 @@ import tempfile
 import shutil
 import random
 import string
+import time
 
 # Authentication blueprint is registered in __init__.py
 
@@ -168,58 +169,94 @@ def delete_metadata():
 @jwt_required
 def upload_file():
     """Upload and save a video file."""
+    upload_start_time = time.time()
     try:
-        save_to_s3 = True  
+        logger.info("🚀 Starting file upload process")
+        
+        save_to_s3 = True
+        step_start = time.time()
+        
         if 'url' in request.form:
             file_path, internal_name = process_url_request(request.form['url'])
             file = None  # No file object for URL-based uploads
+            step_elapsed = time.time() - step_start
+            logger.info(f"📥 URL processing completed in {step_elapsed:.3f}s")
         else:
             # Validate and process the uploaded file
             file, file_path, internal_name, save_to_s3 = process_upload_request()
+            step_elapsed = time.time() - step_start
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+            logger.info(f"📁 File upload processing completed in {step_elapsed:.3f}s ({file_size:.2f}MB)")
 
         # Process video for web compatibility (convert H.265 to H.264 if needed)
-        logger.info(f"Processing video for web compatibility: {file_path}")
+        compat_start = time.time()
+        logger.info(f"🔄 Starting video compatibility processing: {file_path}")
         processed_file_path = process_video_for_web_compatibility(file_path)
+        compat_elapsed = time.time() - compat_start
         
         # Update the file path if conversion occurred
         if processed_file_path != file_path:
-            logger.info(f"Video converted from H.265 to H.264: {processed_file_path}")
+            logger.info(f"✅ Video converted from H.265 to H.264 in {compat_elapsed:.3f}s: {processed_file_path}")
             file_path = processed_file_path
+        else:
+            logger.info(f"✅ Video compatibility check completed in {compat_elapsed:.3f}s")
 
         # Handle S3 or local saving (using the processed file)
+        storage_start = time.time()
         s3_url = handle_file_storage(file, file_path, save_to_s3)
+        storage_elapsed = time.time() - storage_start
+        logger.info(f"☁️ File storage completed in {storage_elapsed:.3f}s (S3: {save_to_s3})")
 
         # Extract video metadata
+        metadata_start = time.time()
         video_metadata = extract_video_metadata(file_path)
+        metadata_elapsed = time.time() - metadata_start
+        logger.info(f"📊 Video metadata extraction completed in {metadata_elapsed:.3f}s")
 
         # Save the thumbnail to GridFS and delete it locally
+        thumb_start = time.time()
         thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
+        thumb_elapsed = time.time() - thumb_start
+        logger.info(f"🖼️ Thumbnail GridFS storage completed in {thumb_elapsed:.3f}s")
 
         # Combine metadata and save to MongoDB
+        db_start = time.time()
         combined_metadata = combine_and_save_metadata(
             video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
         )
+        db_elapsed = time.time() - db_start
+        logger.info(f"💾 Database metadata save completed in {db_elapsed:.3f}s")
         
         # Start async processing if we uploaded an H.265 file and it wasn't converted yet
         # This handles the case where async processing is enabled
+        async_start = time.time()
         video_id = combined_metadata.get("_id")
         if video_id and os.path.exists(file_path):
             from app.utils import detect_video_codec, ASYNC_PROCESSING
             if ASYNC_PROCESSING:
                 codec = detect_video_codec(file_path)
                 if codec in ['hevc', 'h265']:
-                    logger.info(f"Starting async H.265 processing for video {video_id}")
+                    logger.info(f"🔄 Starting async H.265 processing for video {video_id}")
                     
                     # Create S3 re-upload callback
                     def s3_reupload_callback(converted_path):
                         return upload_to_s3(converted_path, content_type='video/mp4')
                     
                     process_video_async(file_path, video_id, s3_reupload_callback)
+        async_elapsed = time.time() - async_start
+        logger.info(f"⚡ Async processing setup completed in {async_elapsed:.3f}s")
         
         # Now that all processing is done, schedule the local file for deletion
+        cleanup_start = time.time()
         if save_to_s3 and os.path.exists(file_path):
-            logger.info(f"Processing complete, scheduling deletion of local file: {file_path}")
+            logger.info(f"🗑️ Scheduling deletion of local file: {file_path}")
             schedule_delete(file_path, delay=3600)  # Delete after 1 hour
+        cleanup_elapsed = time.time() - cleanup_start
+        
+        # Calculate total time and log summary
+        total_elapsed = time.time() - upload_start_time
+        logger.info(f"🎉 UPLOAD COMPLETE! Total time: {total_elapsed:.3f}s")
+        logger.info(f"⏱️ Time breakdown: Upload: {step_elapsed:.3f}s | Compat: {compat_elapsed:.3f}s | Storage: {storage_elapsed:.3f}s | Metadata: {metadata_elapsed:.3f}s | Thumb: {thumb_elapsed:.3f}s | DB: {db_elapsed:.3f}s | Async: {async_elapsed:.3f}s | Cleanup: {cleanup_elapsed:.3f}s")
         
         # Format response to match API documentation
         response_data = {
@@ -239,7 +276,8 @@ def upload_file():
 
         return jsonify(response_data), 201
     except Exception as e:
-        logger.error(f"Error uploading file: {e}")
+        total_elapsed = time.time() - upload_start_time
+        logger.error(f"❌ Upload failed after {total_elapsed:.3f}s: {e}")
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
     
 # Comments API endpoints

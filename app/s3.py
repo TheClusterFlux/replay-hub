@@ -1,6 +1,7 @@
 import os
 import boto3
 import mimetypes
+import time
 from botocore.exceptions import ClientError
 from app.config import AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME, S3_REGION
 import logging
@@ -28,47 +29,50 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
     :param content_type: Optional content type override
     :return: Public URL of the uploaded file or None if error
     """
-    logger.info(f"Starting upload to S3. File path: {file_path}, Object name: {object_name}")
+    upload_start_time = time.time()
+    logger.info(f"☁️ Starting S3 upload for: {file_path}")
 
     # If S3 object_name was not specified, use the filename from file_path
     if object_name is None:
         object_name = os.path.basename(file_path)
-        logger.info(f"No object name provided. Using file name as object name: {object_name}")
+        logger.info(f"📝 Using file name as object name: {object_name}")
 
     # Verify that the file exists
     if not os.path.exists(file_path):
-        logger.error(f"File does not exist: {file_path}")
+        elapsed = time.time() - upload_start_time
+        logger.error(f"❌ File does not exist after {elapsed:.3f}s: {file_path}")
         return None
 
     # Get file size for logging
     file_size = os.path.getsize(file_path)
-    logger.info(f"File size: {file_size // MB}MB")
+    file_size_mb = file_size / MB
+    logger.info(f"📦 File size: {file_size_mb:.2f}MB")
 
     # Determine the file's content type if not provided
+    content_type_start = time.time()
     if content_type is None:
         content_type = get_content_type(file_path)
-        logger.info(f"Detected content type: {content_type}")
+    content_type_elapsed = time.time() - content_type_start
+    logger.info(f"🏷️ Content type detected in {content_type_elapsed:.3f}s: {content_type}")
 
     # Log AWS configuration details (without exposing sensitive information)
-    logger.info(f"AWS Region: {S3_REGION}, Bucket Name: {S3_BUCKET_NAME}")
-
-    # Log AWS credentials and region for debugging (do not log secrets in production)
-    logger.info(f"AWS_ACCESS_KEY: {AWS_ACCESS_KEY[:4]}... (truncated for security)")
-    logger.info(f"AWS_SECRET_KEY: {AWS_SECRET_KEY[:4]}... (truncated for security)")
-    logger.info(f"S3_REGION: {S3_REGION}")
+    logger.info(f"🌐 Target: {S3_REGION}/{S3_BUCKET_NAME}")
 
     # Create a boto3 client
+    client_start = time.time()
     try:
-        logger.info("Creating S3 client...")
+        logger.info("🔧 Creating S3 client...")
         s3_client = boto3.client(
             's3',
             region_name=S3_REGION,
             aws_access_key_id=AWS_ACCESS_KEY,
             aws_secret_access_key=AWS_SECRET_KEY
         )
-        logger.info("S3 client created successfully.")
+        client_elapsed = time.time() - client_start
+        logger.info(f"✅ S3 client created in {client_elapsed:.3f}s")
     except Exception as e:
-        logger.error(f"Failed to create S3 client: {e}")
+        elapsed = time.time() - upload_start_time
+        logger.error(f"❌ Failed to create S3 client after {elapsed:.3f}s: {e}")
         return None
 
     try:
@@ -79,10 +83,11 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
         }
         
         # Upload the file with optimized transfer configuration
-        logger.info(f"Uploading file to S3 bucket: {S3_BUCKET_NAME}, Object name: {object_name}")
+        actual_upload_start = time.time()
+        logger.info(f"🚀 Starting upload to S3: {object_name}")
         
         if file_size > 64 * MB:
-            logger.info(f"Large file detected ({file_size // MB}MB), using multipart upload")
+            logger.info(f"📤 Large file detected ({file_size_mb:.2f}MB), using multipart upload")
         
         s3_client.upload_file(
             file_path, 
@@ -91,18 +96,26 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
             ExtraArgs=extra_args,
             Config=transfer_config
         )
-        logger.info(f"File uploaded successfully to bucket: {S3_BUCKET_NAME}, Object name: {object_name}")
+        
+        actual_upload_elapsed = time.time() - actual_upload_start
+        upload_speed = file_size_mb / actual_upload_elapsed if actual_upload_elapsed > 0 else 0
+        logger.info(f"📤 Upload completed in {actual_upload_elapsed:.3f}s ({upload_speed:.2f} MB/s)")
 
         # Generate the URL
         url = f"https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{object_name}"
-        logger.info(f"Generated S3 URL: {url}")
+        
+        total_elapsed = time.time() - upload_start_time
+        logger.info(f"🎉 S3 upload process completed in {total_elapsed:.3f}s total")
+        logger.info(f"🔗 S3 URL: {url}")
         return url
 
     except ClientError as e:
-        logger.error(f"ClientError during S3 upload: {e}")
+        elapsed = time.time() - upload_start_time
+        logger.error(f"❌ S3 ClientError after {elapsed:.3f}s: {e}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error during S3 upload: {e}")
+        elapsed = time.time() - upload_start_time
+        logger.error(f"❌ S3 upload failed after {elapsed:.3f}s: {e}")
         return None
 
 def upload_to_s3_async(file_path, object_name=None, content_type=None, callback=None):

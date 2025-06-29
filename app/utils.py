@@ -5,7 +5,6 @@ import threading
 import subprocess
 import tempfile
 import shutil
-from moviepy.editor import VideoFileClip
 from app import logger
 
 def allowed_file(filename):
@@ -25,35 +24,134 @@ CONVERSION_PRESET = os.getenv('CONVERSION_PRESET', 'slow')  # slow preset for be
 MAX_CONVERSION_TIME = int(os.getenv('MAX_CONVERSION_TIME', '36000'))  # seconds
 ASYNC_PROCESSING = os.getenv('ASYNC_PROCESSING', 'true').lower() == 'true'
 LOSSLESS_MODE = os.getenv('LOSSLESS_MODE', 'true').lower() == 'true'  # True lossless encoding
+FAST_UPLOAD_MODE = os.getenv('FAST_UPLOAD_MODE', 'false').lower() == 'true'  # Skip metadata extraction for speed
 
 def extract_video_metadata(file_path):
-    """Extract metadata from a video file."""
+    """Extract metadata from a video file using ffmpeg for speed."""
+    start_time = time.time()
     try:
-        logger.info(f"Extracting metadata from video: {file_path}")
-        clip = VideoFileClip(file_path)
-
-        metadata = {
-            "duration": clip.duration,
-            "resolution": f"{clip.size[0]}x{clip.size[1]}",
-            "fps": clip.fps,
-            "file_path": file_path  # Add the file path to the metadata
-        }
-
-        # Generate a thumbnail
-        thumbnail_path = file_path + "_thumbnail.jpg"
-        clip.save_frame(thumbnail_path, t=0)
-        metadata["thumbnail_path"] = thumbnail_path
-
-        logger.info(f"Extracted metadata: {metadata}")
-        return metadata
+        logger.info(f"🎬 Starting metadata extraction for: {file_path}")
+        
+        # Fast upload mode - return minimal metadata immediately
+        if FAST_UPLOAD_MODE:
+            elapsed = time.time() - start_time
+            logger.info(f"⚡ FAST_UPLOAD_MODE enabled - returning minimal metadata (took {elapsed:.3f}s)")
+            return {
+                "duration": 0,
+                "resolution": "unknown",
+                "fps": 0,
+                "file_path": file_path,
+                "thumbnail_path": None
+            }
+        
+        # Use ffmpeg for fast metadata extraction
+        if not check_ffmpeg_available():
+            elapsed = time.time() - start_time
+            logger.warning(f"⚠️ FFmpeg not available - using basic metadata (took {elapsed:.3f}s)")
+            return {
+                "duration": 0,
+                "resolution": "unknown",
+                "fps": 0,
+                "file_path": file_path,
+                "thumbnail_path": None
+            }
+        
+        # Get video info with ffprobe (much faster than moviepy)
+        probe_start = time.time()
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_format', '-show_streams', file_path
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            probe_elapsed = time.time() - probe_start
+            logger.info(f"📊 ffprobe completed in {probe_elapsed:.3f}s")
+            
+            if result.returncode != 0:
+                logger.error(f"ffprobe failed: {result.stderr}")
+                raise Exception("ffprobe failed")
+                
+            import json
+            info = json.loads(result.stdout)
+            
+            # Extract video stream info
+            video_stream = None
+            for stream in info.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    video_stream = stream
+                    break
+            
+            if not video_stream:
+                raise Exception("No video stream found")
+            
+            # Extract metadata
+            duration = float(info.get('format', {}).get('duration', 0))
+            width = video_stream.get('width', 0)
+            height = video_stream.get('height', 0)
+            fps = 0
+            
+            # Parse FPS
+            fps_str = video_stream.get('r_frame_rate', '0/1')
+            try:
+                if '/' in fps_str:
+                    num, den = fps_str.split('/')
+                    fps = float(num) / float(den) if float(den) != 0 else 0
+                else:
+                    fps = float(fps_str)
+            except:
+                fps = 0
+            
+            metadata = {
+                "duration": duration,
+                "resolution": f"{width}x{height}",
+                "fps": fps,
+                "file_path": file_path
+            }
+            
+            # Generate thumbnail with ffmpeg (much faster than moviepy)
+            thumb_start = time.time()
+            thumbnail_path = file_path + "_thumbnail.jpg"
+            thumb_cmd = [
+                'ffmpeg', '-i', file_path, '-ss', '00:00:01', '-vframes', '1',
+                '-y', thumbnail_path
+            ]
+            
+            try:
+                thumb_result = subprocess.run(thumb_cmd, capture_output=True, text=True, timeout=10)
+                thumb_elapsed = time.time() - thumb_start
+                
+                if thumb_result.returncode == 0 and os.path.exists(thumbnail_path):
+                    metadata["thumbnail_path"] = thumbnail_path
+                    logger.info(f"🖼️ Thumbnail generated in {thumb_elapsed:.3f}s: {thumbnail_path}")
+                else:
+                    logger.warning(f"⚠️ Thumbnail generation failed in {thumb_elapsed:.3f}s: {thumb_result.stderr}")
+                    metadata["thumbnail_path"] = None
+            except subprocess.TimeoutExpired:
+                thumb_elapsed = time.time() - thumb_start
+                logger.warning(f"⏰ Thumbnail generation timed out after {thumb_elapsed:.3f}s")
+                metadata["thumbnail_path"] = None
+            
+            total_elapsed = time.time() - start_time
+            logger.info(f"✅ Metadata extraction completed in {total_elapsed:.3f}s total (probe: {probe_elapsed:.3f}s, thumb: {thumb_elapsed:.3f}s)")
+            return metadata
+            
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - start_time
+            logger.error(f"⏰ ffprobe timed out after {elapsed:.3f}s")
+            raise Exception("Metadata extraction timed out")
+            
     except Exception as e:
-        logger.error(f"Error extracting metadata: {e}")
-        raise
-    finally:
-        # Just close the clip but don't delete the file here
-        # The file will be deleted after the entire upload process is complete
-        if 'clip' in locals() and clip:
-            clip.close()
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Error extracting metadata after {elapsed:.3f}s: {e}")
+        # Fallback to basic metadata
+        return {
+            "duration": 0,
+            "resolution": "unknown", 
+            "fps": 0,
+            "file_path": file_path,
+            "thumbnail_path": None
+        }
 
 def check_ffmpeg_available():
     """Check if FFmpeg is available on the system."""
@@ -65,10 +163,14 @@ def check_ffmpeg_available():
 
 def detect_video_codec(file_path):
     """Detect video codec using ffprobe."""
+    start_time = time.time()
     try:
+        logger.info(f"🔍 Starting codec detection for: {file_path}")
+        
         # First check if ffmpeg/ffprobe is available
         if not check_ffmpeg_available():
-            logger.warning("FFmpeg not available - cannot detect video codec")
+            elapsed = time.time() - start_time
+            logger.warning(f"⚠️ FFmpeg not available - codec detection failed ({elapsed:.3f}s)")
             return "unknown"
             
         cmd = [
@@ -76,20 +178,23 @@ def detect_video_codec(file_path):
             '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', file_path
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        elapsed = time.time() - start_time
         
         if result.returncode == 0:
             codec = result.stdout.strip().lower()
-            logger.info(f"Detected video codec: {codec} for file: {file_path}")
+            logger.info(f"✅ Codec detected in {elapsed:.3f}s: '{codec}' for {file_path}")
             return codec
         else:
-            logger.error(f"ffprobe failed with return code {result.returncode}: {result.stderr}")
+            logger.error(f"❌ ffprobe failed in {elapsed:.3f}s with return code {result.returncode}: {result.stderr}")
             return "unknown"
             
     except subprocess.TimeoutExpired:
-        logger.error(f"Timeout while detecting codec for: {file_path}")
+        elapsed = time.time() - start_time
+        logger.error(f"⏰ Codec detection timed out after {elapsed:.3f}s for: {file_path}")
         return "unknown"
     except Exception as e:
-        logger.error(f"Error detecting codec for {file_path}: {e}")
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Error detecting codec after {elapsed:.3f}s for {file_path}: {e}")
         return "unknown"
 
 def get_video_info(file_path):
@@ -325,35 +430,66 @@ def process_video_for_web_compatibility(file_path):
     Converts H.265/HEVC to H.264 if needed.
     Returns the path to the processed (web-compatible) video.
     
-    If ASYNC_PROCESSING is enabled, this will check codec quickly and return
-    the original file, with conversion happening in background.
+    If ASYNC_PROCESSING is enabled, this will return immediately for fast uploads,
+    with conversion happening in background.
     """
+    start_time = time.time()
     try:
+        logger.info(f"🔄 Starting video compatibility processing: {file_path}")
+        
         # Check if video conversion is enabled
         if not ENABLE_VIDEO_CONVERSION:
-            logger.info("Video conversion is disabled (ENABLE_VIDEO_CONVERSION=false)")
+            elapsed = time.time() - start_time
+            logger.info(f"🚫 Video conversion disabled - skipping (took {elapsed:.3f}s)")
             return file_path
         
         # Validate input
         if not file_path or not os.path.exists(file_path):
-            logger.error(f"Invalid file path for web compatibility processing: {file_path}")
+            elapsed = time.time() - start_time
+            logger.error(f"❌ Invalid file path after {elapsed:.3f}s: {file_path}")
             return file_path
         
-        # Quick codec detection
-        codec = detect_video_codec(file_path)
-        logger.info(f"Video codec detection result: {codec}")
+        # Get file size for optimization decisions
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)
         
-        # If async processing is enabled and we detect H.265, return original file
-        # and let async processing handle conversion
-        if ASYNC_PROCESSING and codec in ['hevc', 'h265']:
-            logger.info(f"H.265 detected, async processing enabled - returning original file for fast upload")
+        # For small files (< 10MB) with async processing enabled, skip codec detection
+        # and return immediately for faster uploads
+        if ASYNC_PROCESSING and file_size_mb < 10:
+            elapsed = time.time() - start_time
+            logger.info(f"⚡ Small file ({file_size_mb:.1f}MB) with async processing - skipping codec detection (took {elapsed:.3f}s)")
             return file_path
         
-        # For non-async or non-H.265 files, use synchronous processing
-        return process_video_for_web_compatibility_sync(file_path)
+        # Quick codec detection only if we need it
+        if not ASYNC_PROCESSING or file_size_mb >= 10:
+            codec_start = time.time()
+            codec = detect_video_codec(file_path)
+            codec_elapsed = time.time() - codec_start
+            logger.info(f"🔍 Codec detection completed in {codec_elapsed:.3f}s - result: {codec}")
+            
+            # If async processing is enabled and we detect H.265, return original file
+            # and let async processing handle conversion
+            if ASYNC_PROCESSING and codec in ['hevc', 'h265']:
+                elapsed = time.time() - start_time
+                logger.info(f"🎯 H.265 detected with async processing - returning original file for fast upload (took {elapsed:.3f}s)")
+                return file_path
+            
+            # For non-async or non-H.265 files, use synchronous processing
+            sync_start = time.time()
+            result = process_video_for_web_compatibility_sync(file_path)
+            sync_elapsed = time.time() - sync_start
+            total_elapsed = time.time() - start_time
+            logger.info(f"🔄 Synchronous processing completed in {sync_elapsed:.3f}s (total: {total_elapsed:.3f}s)")
+            return result
+        
+        # Default case - return original file
+        elapsed = time.time() - start_time
+        logger.info(f"✅ Video processing completed - using original file (took {elapsed:.3f}s)")
+        return file_path
             
     except Exception as e:
-        logger.error(f"Error processing video for web compatibility: {e}")
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Error in video compatibility processing after {elapsed:.3f}s: {e}")
         return file_path  # Return original file if processing fails
 
 def schedule_delete(file_path, delay):
@@ -383,15 +519,27 @@ def schedule_delete(file_path, delay):
     logger.info(f"Started background thread for path deletion: {file_path}")
 
 # Log configuration on module load
-logger.info(f"Video processing configuration:")
-logger.info(f"  ENABLE_VIDEO_CONVERSION: {ENABLE_VIDEO_CONVERSION}")
-logger.info(f"  ASYNC_PROCESSING: {ASYNC_PROCESSING}")
-logger.info(f"  LOSSLESS_MODE: {LOSSLESS_MODE}")
-logger.info(f"  CONVERSION_QUALITY (CRF): {CONVERSION_QUALITY}")
-logger.info(f"  CONVERSION_PRESET: {CONVERSION_PRESET}")
-logger.info(f"  MAX_CONVERSION_TIME: {MAX_CONVERSION_TIME}s")
+logger.info("=" * 60)
+logger.info("🚀 VIDEO PROCESSING CONFIGURATION")
+logger.info("=" * 60)
+logger.info(f"  📹 ENABLE_VIDEO_CONVERSION: {ENABLE_VIDEO_CONVERSION}")
+logger.info(f"  ⚡ ASYNC_PROCESSING: {ASYNC_PROCESSING}")
+logger.info(f"  🏃 FAST_UPLOAD_MODE: {FAST_UPLOAD_MODE}")
+logger.info(f"  💎 LOSSLESS_MODE: {LOSSLESS_MODE}")
+logger.info(f"  🎯 CONVERSION_QUALITY (CRF): {CONVERSION_QUALITY}")
+logger.info(f"  ⚙️ CONVERSION_PRESET: {CONVERSION_PRESET}")
+logger.info(f"  ⏰ MAX_CONVERSION_TIME: {MAX_CONVERSION_TIME}s")
+
+if FAST_UPLOAD_MODE:
+    logger.info("🔥 FAST_UPLOAD_MODE ENABLED - Ultra-fast uploads (minimal metadata)")
+elif ASYNC_PROCESSING:
+    logger.info("⚡ ASYNC_PROCESSING ENABLED - Fast uploads with background processing")
+else:
+    logger.info("🐌 SYNCHRONOUS MODE - Full processing during upload")
 
 if LOSSLESS_MODE:
     logger.info("🎯 TRUE LOSSLESS MODE ENABLED - Zero quality loss guaranteed")
 else:
     logger.info(f"🎯 HIGH QUALITY MODE - CRF {CONVERSION_QUALITY} (visually lossless)")
+    
+logger.info("=" * 60)
