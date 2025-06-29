@@ -1282,9 +1282,10 @@ def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnai
     # Check if user is authenticated (from request context)
     if hasattr(request, 'current_user') and request.current_user:
         user = request.current_user
-        uploader_id = user.id
+        uploader_id = str(user._id)  # Use _id attribute and convert to string
         uploader_username = user.username
-        uploader = user.display_name or user.username
+        # Compute display name like in to_dict() method
+        uploader = f"{user.first_name} {user.last_name}".strip() or user.username
         logger.info(f"Video uploaded by authenticated user: {uploader_username}")
     else:
         logger.info("Video uploaded by anonymous user")
