@@ -3,10 +3,7 @@ import boto3
 import mimetypes
 import time
 from botocore.exceptions import ClientError
-from app.config import (
-    AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME, S3_REGION, 
-    S3_ENDPOINT_URL, S3_FORCE_PATH_STYLE
-)
+from app.config import AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET_NAME, S3_REGION
 import logging
 import threading
 from boto3.s3.transfer import TransferConfig
@@ -58,40 +55,19 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
     content_type_elapsed = time.time() - content_type_start
     logger.info(f"🏷️ Content type detected in {content_type_elapsed:.3f}s: {content_type}")
 
-    # Log configuration details
-    if S3_ENDPOINT_URL:
-        logger.info(f"🌐 Target: LocalStack {S3_ENDPOINT_URL}/{S3_BUCKET_NAME}")
-    else:
-        logger.info(f"🌐 Target: AWS {S3_REGION}/{S3_BUCKET_NAME}")
+    # Log AWS configuration details (without exposing sensitive information)
+    logger.info(f"🌐 Target: {S3_REGION}/{S3_BUCKET_NAME}")
 
     # Create a boto3 client
     client_start = time.time()
     try:
         logger.info("🔧 Creating S3 client...")
-        
-        # Configure client based on whether we're using LocalStack or AWS
-        client_kwargs = {
-            'region_name': S3_REGION,
-            'aws_access_key_id': AWS_ACCESS_KEY,
-            'aws_secret_access_key': AWS_SECRET_KEY
-        }
-        
-        if S3_ENDPOINT_URL:
-            # LocalStack configuration
-            client_kwargs.update({
-                'endpoint_url': S3_ENDPOINT_URL,
-                'use_ssl': False,
-                'verify': False
-            })
-            
-            # Configure path-style addressing for LocalStack
-            if S3_FORCE_PATH_STYLE:
-                client_kwargs['config'] = boto3.session.Config(
-                    s3={'addressing_style': 'path'}
-                )
-        
-        s3_client = boto3.client('s3', **client_kwargs)
-        
+        s3_client = boto3.client(
+            's3',
+            region_name=S3_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY
+        )
         client_elapsed = time.time() - client_start
         logger.info(f"✅ S3 client created in {client_elapsed:.3f}s")
     except Exception as e:
@@ -125,13 +101,8 @@ def upload_to_s3(file_path, object_name=None, content_type=None):
         upload_speed = file_size_mb / actual_upload_elapsed if actual_upload_elapsed > 0 else 0
         logger.info(f"📤 Upload completed in {actual_upload_elapsed:.3f}s ({upload_speed:.2f} MB/s)")
 
-        # Generate the URL based on configuration
-        if S3_ENDPOINT_URL:
-            # LocalStack URL format
-            url = f"{S3_ENDPOINT_URL}/{S3_BUCKET_NAME}/{object_name}"
-        else:
-            # AWS S3 URL format
-            url = f"https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{object_name}"
+        # Generate the URL
+        url = f"https://{S3_BUCKET_NAME}.s3.{S3_REGION}.amazonaws.com/{object_name}"
         
         total_elapsed = time.time() - upload_start_time
         logger.info(f"🎉 S3 upload process completed in {total_elapsed:.3f}s total")
