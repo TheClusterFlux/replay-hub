@@ -4,7 +4,7 @@ from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
 from app import app, logger
 from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document, get_db
-from app.utils import extract_video_metadata, schedule_delete, process_video_for_web_compatibility, process_video_async
+from app.utils import extract_video_metadata, schedule_delete
 from app.config import UPLOAD_FOLDER
 from app.s3 import upload_to_s3
 from app.auth import auth_bp, jwt_required, optional_jwt
@@ -188,20 +188,11 @@ def upload_file():
             file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
             logger.info(f"📁 File upload processing completed in {step_elapsed:.3f}s ({file_size:.2f}MB)")
 
-        # Process video for web compatibility (convert H.265 to H.264 if needed)
-        compat_start = time.time()
-        logger.info(f"🔄 Starting video compatibility processing: {file_path}")
-        processed_file_path = process_video_for_web_compatibility(file_path)
-        compat_elapsed = time.time() - compat_start
-        
-        # Update the file path if conversion occurred
-        if processed_file_path != file_path:
-            logger.info(f"✅ Video converted from H.265 to H.264 in {compat_elapsed:.3f}s: {processed_file_path}")
-            file_path = processed_file_path
-        else:
-            logger.info(f"✅ Video compatibility check completed in {compat_elapsed:.3f}s")
+        # SKIP video compatibility processing - we want to keep H.265 videos as-is
+        # No conversion from H.265 to H.264
+        logger.info(f"✅ Skipping video conversion - keeping original H.265 format")
 
-        # Handle S3 or local saving (using the processed file)
+        # Handle S3 or local saving (using the original file, no conversion)
         storage_start = time.time()
         s3_url = handle_file_storage(file, file_path, save_to_s3)
         storage_elapsed = time.time() - storage_start
@@ -227,24 +218,10 @@ def upload_file():
         db_elapsed = time.time() - db_start
         logger.info(f"💾 Database metadata save completed in {db_elapsed:.3f}s")
         
-        # Start async processing if we uploaded an H.265 file and it wasn't converted yet
-        # This handles the case where async processing is enabled
-        async_start = time.time()
-        video_id = combined_metadata.get("_id")
-        if video_id and os.path.exists(file_path):
-            from app.utils import detect_video_codec, ASYNC_PROCESSING
-            if ASYNC_PROCESSING:
-                codec = detect_video_codec(file_path)
-                if codec in ['hevc', 'h265']:
-                    logger.info(f"🔄 Starting async H.265 processing for video {video_id}")
-                    
-                    # Create S3 re-upload callback
-                    def s3_reupload_callback(converted_path):
-                        return upload_to_s3(converted_path, content_type='video/mp4')
-                    
-                    process_video_async(file_path, video_id, s3_reupload_callback)
-        async_elapsed = time.time() - async_start
-        logger.info(f"⚡ Async processing setup completed in {async_elapsed:.3f}s")
+        # SKIP async processing - we don't want to convert H.265 to H.264
+        # Keep videos in their original H.265 format
+        logger.info(f"✅ Skipping async video processing - keeping original format")
+        async_elapsed = 0  # No async processing time
         
         # Now that all processing is done, schedule the local file for deletion
         cleanup_start = time.time()
@@ -256,7 +233,7 @@ def upload_file():
         # Calculate total time and log summary
         total_elapsed = time.time() - upload_start_time
         logger.info(f"🎉 UPLOAD COMPLETE! Total time: {total_elapsed:.3f}s")
-        logger.info(f"⏱️ Time breakdown: Upload: {step_elapsed:.3f}s | Compat: {compat_elapsed:.3f}s | Storage: {storage_elapsed:.3f}s | Metadata: {metadata_elapsed:.3f}s | Thumb: {thumb_elapsed:.3f}s | DB: {db_elapsed:.3f}s | Async: {async_elapsed:.3f}s | Cleanup: {cleanup_elapsed:.3f}s")
+        logger.info(f"⏱️ Time breakdown: Upload: {step_elapsed:.3f}s | Storage: {storage_elapsed:.3f}s | Metadata: {metadata_elapsed:.3f}s | Thumb: {thumb_elapsed:.3f}s | DB: {db_elapsed:.3f}s | Cleanup: {cleanup_elapsed:.3f}s")
         
         # Format response to match API documentation
         response_data = {
@@ -1540,16 +1517,11 @@ def finalize_upload():
         # Now process the complete file similar to the regular upload endpoint
         save_to_s3 = True
         
-        # Process video for web compatibility (convert H.265 to H.264 if needed)
-        logger.info(f"Processing chunked video for web compatibility: {complete_file_path}")
-        processed_file_path = process_video_for_web_compatibility(complete_file_path)
+        # SKIP video compatibility processing - we want to keep H.265 videos as-is
+        # No conversion from H.265 to H.264
+        logger.info(f"✅ Skipping video conversion for chunked upload - keeping original H.265 format")
         
-        # Update the file path if conversion occurred
-        if processed_file_path != complete_file_path:
-            logger.info(f"Chunked video converted from H.265 to H.264: {processed_file_path}")
-            complete_file_path = processed_file_path
-        
-        # Handle S3 or local saving
+        # Handle S3 or local saving (using the original file, no conversion)
         s3_url = handle_file_storage(None, complete_file_path, save_to_s3)
         
         # Extract video metadata
@@ -1571,20 +1543,9 @@ def finalize_upload():
             video_metadata, form_data, internal_name, thumbnail_id, s3_url
         )
         
-        # Start async processing for chunked uploads too
-        video_id = combined_metadata.get("_id")
-        if video_id and os.path.exists(complete_file_path):
-            from app.utils import detect_video_codec, ASYNC_PROCESSING
-            if ASYNC_PROCESSING:
-                codec = detect_video_codec(complete_file_path)
-                if codec in ['hevc', 'h265']:
-                    logger.info(f"Starting async H.265 processing for chunked video {video_id}")
-                    
-                    # Create S3 re-upload callback
-                    def s3_reupload_callback(converted_path):
-                        return upload_to_s3(converted_path, content_type='video/mp4')
-                    
-                    process_video_async(complete_file_path, video_id, s3_reupload_callback)
+        # SKIP async processing for chunked uploads - we don't want to convert H.265 to H.264
+        # Keep videos in their original H.265 format
+        logger.info(f"✅ Skipping async video processing for chunked upload - keeping original format")
         
         # Schedule deletion of the complete file now that processing is done
         if save_to_s3 and os.path.exists(complete_file_path):
