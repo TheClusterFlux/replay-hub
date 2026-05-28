@@ -6,7 +6,15 @@ from app import app, logger
 from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document, get_db
 from app.utils import extract_video_metadata, schedule_delete
 from app.config import UPLOAD_FOLDER
-from app.s3 import upload_to_s3
+from app.storage import upload_file as upload_to_storage
+from app.config import VIDEO_ENCODING_STRATEGY
+from app.storage import build_video_urls, video_storage_prefix
+from app.encoding_queue import enqueue_server_encoding
+from app.video_metadata import (
+    format_video_document,
+    combine_and_save_metadata,
+    generate_short_id,
+)
 from app.auth import auth_bp, jwt_required, optional_jwt
 import uuid
 import requests
@@ -55,25 +63,7 @@ def get_metadata():
         filters = request.args.to_dict()
         metadata = fetch_from_db(filters)
         # Transform the response to match the expected format in the API docs
-        formatted_metadata = []
-        for item in metadata:
-            formatted_item = {
-                "id": item.get("_id", str(uuid.uuid4())),
-                "short_id": item.get("short_id", ""),
-                "title": item.get("title", ""),
-                "description": item.get("description", ""),
-                "s3_url": item.get("s3_url", ""),
-                "thumbnail_id": item.get("thumbnail_id", ""),
-                "duration": item.get("duration", 0),
-                "resolution": item.get("resolution", ""),
-                "upload_date": item.get("upload_date", datetime.datetime.now().isoformat()),
-                "uploader": item.get("uploader", "Anonymous"),
-                "views": item.get("views", 0),
-                "likes": item.get("likes", 0),
-                "dislikes": item.get("dislikes", 0),
-                "players": item.get("players", [])
-            }
-            formatted_metadata.append(formatted_item)
+        formatted_metadata = [format_video_document(item) for item in metadata]
         logger.info(f"Fetched metadata: {formatted_metadata}")
         response = jsonify(formatted_metadata)
         response.headers['Access-Control-Allow-Origin'] = '*'
@@ -100,23 +90,7 @@ def get_video_metadata(video_id):
         if not video:
             return jsonify({"error": "Video not found"}), 404
         # Format the response to match API specs
-        formatted_video = {
-            "id": video.get("_id", video_id),
-            "short_id": video.get("short_id", ""),
-            "title": video.get("title", ""),
-            "description": video.get("description", ""),
-            "s3_url": video.get("s3_url", ""),
-            "thumbnail_id": video.get("thumbnail_id", ""),
-            "duration": video.get("duration", 0),
-            "resolution": video.get("resolution", ""),
-            "upload_date": video.get("upload_date", datetime.datetime.now().isoformat()),
-            "uploader": video.get("uploader", "Anonymous"),
-            "views": video.get("views", 0),
-            "likes": video.get("likes", 0),
-            "dislikes": video.get("dislikes", 0),
-            "players": video.get("players", [])
-        }
-        return jsonify(formatted_video), 200
+        return jsonify(format_video_document(video)), 200
     except Exception as e:
         logger.error(f"Error fetching video metadata: {e}")
         return jsonify({"error": str(e)}), 500
@@ -188,70 +162,52 @@ def upload_file():
             file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
             logger.info(f"📁 File upload processing completed in {step_elapsed:.3f}s ({file_size:.2f}MB)")
 
-        # SKIP video compatibility processing - we want to keep H.265 videos as-is
-        # No conversion from H.265 to H.264
-        logger.info(f"✅ Skipping video conversion - keeping original H.265 format")
+        is_url_upload = 'url' in request.form
 
-        # Handle S3 or local saving (using the original file, no conversion)
-        storage_start = time.time()
-        s3_url = handle_file_storage(file, file_path, save_to_s3)
-        storage_elapsed = time.time() - storage_start
-        logger.info(f"☁️ File storage completed in {storage_elapsed:.3f}s (S3: {save_to_s3})")
+        if VIDEO_ENCODING_STRATEGY == "CLIENT" and not is_url_upload:
+            return jsonify({
+                "success": False,
+                "error": "Direct upload disabled when VIDEO_ENCODING_STRATEGY=CLIENT. Use browser HLS encoding.",
+                "encoding_strategy": "CLIENT",
+            }), 400
 
-        # Extract video metadata
-        metadata_start = time.time()
         video_metadata = extract_video_metadata(file_path)
-        metadata_elapsed = time.time() - metadata_start
-        logger.info(f"📊 Video metadata extraction completed in {metadata_elapsed:.3f}s")
-
-        # Save the thumbnail to GridFS and delete it locally
-        thumb_start = time.time()
         thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
-        thumb_elapsed = time.time() - thumb_start
-        logger.info(f"🖼️ Thumbnail GridFS storage completed in {thumb_elapsed:.3f}s")
 
-        # Combine metadata and save to MongoDB
-        db_start = time.time()
+        form_data = request.form.to_dict()
+        video_id = form_data.get("id") or str(uuid.uuid4())
+        form_data["id"] = video_id
+        urls = build_video_urls(video_id)
+
         combined_metadata = combine_and_save_metadata(
-            video_metadata, request.form.to_dict(), internal_name, thumbnail_id, s3_url
+            video_metadata,
+            form_data,
+            internal_name,
+            thumbnail_id,
+            urls["s3_url"],
+            extra_fields={
+                **urls,
+                "encoding_status": "pending",
+                "encoding_strategy": "SERVER",
+            },
         )
-        db_elapsed = time.time() - db_start
-        logger.info(f"💾 Database metadata save completed in {db_elapsed:.3f}s")
-        
-        # SKIP async processing - we don't want to convert H.265 to H.264
-        # Keep videos in their original H.265 format
-        logger.info(f"✅ Skipping async video processing - keeping original format")
-        async_elapsed = 0  # No async processing time
-        
-        # Now that all processing is done, schedule the local file for deletion
-        cleanup_start = time.time()
-        if save_to_s3 and os.path.exists(file_path):
-            logger.info(f"🗑️ Scheduling deletion of local file: {file_path}")
-            schedule_delete(file_path, delay=3600)  # Delete after 1 hour
-        cleanup_elapsed = time.time() - cleanup_start
-        
-        # Calculate total time and log summary
-        total_elapsed = time.time() - upload_start_time
-        logger.info(f"🎉 UPLOAD COMPLETE! Total time: {total_elapsed:.3f}s")
-        logger.info(f"⏱️ Time breakdown: Upload: {step_elapsed:.3f}s | Storage: {storage_elapsed:.3f}s | Metadata: {metadata_elapsed:.3f}s | Thumb: {thumb_elapsed:.3f}s | DB: {db_elapsed:.3f}s | Cleanup: {cleanup_elapsed:.3f}s")
-        
-        # Format response to match API documentation
-        response_data = {
-            "success": True,
-            "metadata": {
-                "id": combined_metadata.get("_id", ""),
-                "title": combined_metadata.get("title", ""),
-                "description": combined_metadata.get("description", ""),
-                "s3_url": combined_metadata.get("s3_url", ""),
-                "thumbnail_id": combined_metadata.get("thumbnail_id", ""),
-                "duration": combined_metadata.get("duration", 0),
-                "resolution": combined_metadata.get("resolution", ""),
-                "upload_date": combined_metadata.get("upload_date", datetime.datetime.now().isoformat()),
-                "uploader": combined_metadata.get("uploader", "Anonymous")
-            }
-        }
 
-        return jsonify(response_data), 201
+        enqueue_server_encoding(
+            video_id,
+            file_path,
+            form_data,
+            internal_name,
+            thumbnail_id=thumbnail_id,
+        )
+
+        total_elapsed = time.time() - upload_start_time
+        logger.info("Server encoding queued for %s in %.3fs", video_id, total_elapsed)
+
+        return jsonify({
+            "success": True,
+            "encoding_status": "pending",
+            "metadata": format_video_document(combined_metadata),
+        }), 202
     except Exception as e:
         total_elapsed = time.time() - upload_start_time
         logger.error(f"❌ Upload failed after {total_elapsed:.3f}s: {e}")
@@ -1217,7 +1173,7 @@ def handle_file_storage(file, file_path, save_to_s3=True):
             
             # Upload to S3 directly from the file path (streaming)
             logger.info(f"Uploading file to S3: {file_path}")
-            s3_url = upload_to_s3(file_path, content_type=content_type)
+            s3_url = upload_to_storage(file_path, object_key=os.path.basename(file_path), content_type=content_type)
             
             if s3_url:
                 logger.info(f"File uploaded successfully to S3. URL: {s3_url}")
@@ -1264,78 +1220,6 @@ def save_thumbnail_to_gridfs(video_metadata, internal_name):
     except Exception as e:
         logger.error(f"Error saving thumbnail to GridFS: {e}")
         return None
-
-def combine_and_save_metadata(video_metadata, form_data, internal_name, thumbnail_id, s3_url):
-    """Combine metadata from various sources and save to the database.
-    
-    :param video_metadata: Metadata extracted from the video file
-    :param form_data: Metadata from the form submission
-    :param internal_name: Internal name of the video
-    :param thumbnail_id: ID of the thumbnail in GridFS
-    :param s3_url: URL of the video in S3 or local storage
-    :return: Combined metadata dict as saved to the database
-    """
-    logger.info("Combining and saving metadata")
-    
-    # Process players if provided
-    players = []
-    if form_data.get('players'):
-        try:
-            import json
-            players = json.loads(form_data.get('players', '[]'))
-        except Exception as e:
-            logger.error(f"Error parsing players JSON: {e}")
-    
-    # Generate or use existing short_id
-    short_id = form_data.get('short_id') or generate_short_id()
-    
-    # Get uploader information from authenticated user or form data
-    uploader = form_data.get('uploader', 'Anonymous')
-    uploader_id = None
-    uploader_username = None
-    
-    # Check if user is authenticated (from request context)
-    if hasattr(request, 'current_user') and request.current_user:
-        user = request.current_user
-        uploader_id = str(user._id)  # Use _id attribute and convert to string
-        uploader_username = user.username
-        # Compute display name like in to_dict() method
-        uploader = f"{user.first_name} {user.last_name}".strip() or user.username
-        logger.info(f"Video uploaded by authenticated user: {uploader_username}")
-    else:
-        logger.info("Video uploaded by anonymous user")
-    
-    # Create the metadata document
-    metadata = {
-        "_id": form_data.get('id', str(uuid.uuid4())),
-        "short_id": short_id,
-        "title": form_data.get('title', os.path.basename(video_metadata.get('file_path', ''))),
-        "description": form_data.get('description', ''),
-        "s3_url": s3_url,
-        "internal_name": internal_name,
-        "thumbnail_id": thumbnail_id,
-        "duration": video_metadata.get('duration', 0),
-        "resolution": video_metadata.get('resolution', ''),
-        "upload_date": datetime.datetime.now().isoformat(),
-        "uploader": uploader,
-        "uploader_id": uploader_id,  # Store authenticated user ID
-        "uploader_username": uploader_username,  # Store username for easy reference
-        "views": 0,
-        "likes": 0,
-        "dislikes": 0,
-        "players": players
-    }
-    
-    # Save to database
-    save_to_db(metadata)
-    logger.info(f"Metadata saved to database with ID: {metadata['_id']}")
-    
-    return metadata
-
-def generate_short_id(length=8):
-    """Generate a short, unique, URL-safe ID."""
-    chars = string.ascii_letters + string.digits
-    return ''.join(random.choices(chars, k=length))
 
 @app.route('/upload/init', methods=['POST'])
 @jwt_required
@@ -1517,62 +1401,58 @@ def finalize_upload():
         # Now process the complete file similar to the regular upload endpoint
         save_to_s3 = True
         
-        # SKIP video compatibility processing - we want to keep H.265 videos as-is
-        # No conversion from H.265 to H.264
-        logger.info(f"✅ Skipping video conversion for chunked upload - keeping original H.265 format")
-        
-        # Handle S3 or local saving (using the original file, no conversion)
-        s3_url = handle_file_storage(None, complete_file_path, save_to_s3)
-        
-        # Extract video metadata
-        video_metadata = extract_video_metadata(complete_file_path)
+        if VIDEO_ENCODING_STRATEGY == "CLIENT":
+            schedule_delete(upload_dir, delay=300)
+            if os.path.exists(complete_file_path):
+                schedule_delete(complete_file_path, delay=300)
+            return jsonify({
+                "success": False,
+                "error": "Chunked upload requires SERVER encoding strategy or use client HLS upload.",
+                "encoding_strategy": "CLIENT",
+            }), 400
 
-        # Save the thumbnail to GridFS and delete it locally
+        video_metadata = extract_video_metadata(complete_file_path)
         thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
-        
-        # Get form data from the original metadata
+
         form_data = {
             "title": request.form.get('title', metadata.get("title", "")),
             "description": request.form.get('description', metadata.get("description", "")),
             "uploader": request.form.get('uploader', metadata.get("uploader", "Anonymous")),
-            "players": request.form.get('players', metadata.get("players", "[]"))
+            "players": request.form.get('players', metadata.get("players", "[]")),
         }
-        
-        # Combine metadata and save to MongoDB
+
+        video_id = str(uuid.uuid4())
+        form_data["id"] = video_id
+        urls = build_video_urls(video_id)
+
         combined_metadata = combine_and_save_metadata(
-            video_metadata, form_data, internal_name, thumbnail_id, s3_url
+            video_metadata,
+            form_data,
+            internal_name,
+            thumbnail_id,
+            urls["s3_url"],
+            extra_fields={
+                **urls,
+                "encoding_status": "pending",
+                "encoding_strategy": "SERVER",
+            },
         )
-        
-        # SKIP async processing for chunked uploads - we don't want to convert H.265 to H.264
-        # Keep videos in their original H.265 format
-        logger.info(f"✅ Skipping async video processing for chunked upload - keeping original format")
-        
-        # Schedule deletion of the complete file now that processing is done
-        if save_to_s3 and os.path.exists(complete_file_path):
-            logger.info(f"Scheduling deletion of complete file: {complete_file_path}")
-            schedule_delete(complete_file_path, delay=3600)  # Delete after 1 hour
-            
-        # Schedule deletion of the chunks directory
-        logger.info(f"Scheduling deletion of chunks directory: {upload_dir}")
-        schedule_delete(upload_dir, delay=3600)  # Delete after 1 hour
-        
-        # Format response to match API documentation
-        response_data = {
+
+        enqueue_server_encoding(
+            video_id,
+            complete_file_path,
+            form_data,
+            internal_name,
+            thumbnail_id=thumbnail_id,
+        )
+
+        schedule_delete(upload_dir, delay=3600)
+
+        return jsonify({
             "success": True,
-            "metadata": {
-                "id": combined_metadata.get("_id", ""),
-                "title": combined_metadata.get("title", ""),
-                "description": combined_metadata.get("description", ""),
-                "s3_url": combined_metadata.get("s3_url", ""),
-                "thumbnail_id": combined_metadata.get("thumbnail_id", ""),
-                "duration": combined_metadata.get("duration", 0),
-                "resolution": combined_metadata.get("resolution", ""),
-                "upload_date": combined_metadata.get("upload_date", datetime.datetime.now().isoformat()),
-                "uploader": combined_metadata.get("uploader", "Anonymous")
-            }
-        }
-        
-        return jsonify(response_data), 201
+            "encoding_status": "pending",
+            "metadata": format_video_document(combined_metadata),
+        }), 202
         
     except Exception as e:
         logger.error(f"Error finalizing chunked upload: {e}")

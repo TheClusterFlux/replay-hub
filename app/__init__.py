@@ -53,6 +53,8 @@ def handle_preflight():
         return response
 
 # Import routes to register them with the app
-from app import routes
+from app import routes  # noqa: F401
+from app import hls_routes  # noqa: F401
+from app import stream_routes  # noqa: F401
 
 logger.info("Flask app initialized successfully")

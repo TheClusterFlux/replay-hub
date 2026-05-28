@@ -32,6 +32,36 @@ spec:
               secretKeyRef:
                 name: aws-s3-credentials
                 key: aws-secret-key
+          - name: USE_R2
+            value: "true"
+          - name: VIDEO_ENCODING_STRATEGY
+            value: "CLIENT"
+          - name: R2_ACCOUNT_ID
+            value: "9d6f2289d9d11dc3d803f10c01f4a23d"
+          - name: R2_BUCKET_NAME
+            value: "replay-hub-videos"
+          - name: R2_ENDPOINT
+            value: "https://9d6f2289d9d11dc3d803f10c01f4a23d.r2.cloudflarestorage.com"
+          - name: R2_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials
+                key: access-key-id
+                optional: true
+          - name: R2_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: r2-credentials
+                key: secret-access-key
+                optional: true
+          - name: API_PUBLIC_BASE_URL
+            value: "https://replay-hub.theclusterflux.com"
+          - name: STREAM_WINDOW_SECONDS
+            value: "300"
+          - name: STREAM_LOOKBEHIND_SECONDS
+            value: "60"
+          - name: STREAM_PRESIGN_EXPIRY
+            value: "900"
                 
       imagePullSecrets:
         - name: dockerhub-secret

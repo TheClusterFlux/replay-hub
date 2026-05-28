@@ -1,2 +1,7 @@
-app/__pycache__/
-secret
+.env
+migrate_checkpoint.json
+uploads/
+__pycache__/
+*.pyc
+.Python
+venv/

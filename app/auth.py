@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import os
 from .models import User
 from .utils import allowed_file
-from .s3 import upload_to_s3
+from .storage import upload_file as upload_to_s3
 import tempfile
 
 # Create authentication blueprint
@@ -104,7 +104,7 @@ def register():
                         
                         # Upload to S3
                         s3_key = f"profile_pictures/{username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{os.path.splitext(file.filename)[1]}"
-                        profile_picture_url = upload_to_s3(temp_file.name, s3_key)
+                        profile_picture_url = upload_to_s3(temp_file.name, object_key=s3_key)
                         
                         # Clean up temp file
                         os.unlink(temp_file.name)
@@ -208,7 +208,7 @@ def update_profile():
                         
                         # Upload to S3
                         s3_key = f"profile_pictures/{current_user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{os.path.splitext(file.filename)[1]}"
-                        profile_picture_url = upload_to_s3(temp_file.name, s3_key)
+                        profile_picture_url = upload_to_s3(temp_file.name, object_key=s3_key)
                         
                         # Clean up temp file
                         os.unlink(temp_file.name)

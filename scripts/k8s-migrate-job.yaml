@@ -1,0 +1,74 @@
+# One-time migration job. Create secret first:
+#   kubectl create secret generic r2-credentials \
+#     --from-literal=access-key-id=YOUR_R2_ACCESS_KEY_ID \
+#     --from-literal=secret-access-key=YOUR_R2_SECRET_ACCESS_KEY
+#
+#   kubectl create configmap replay-hub-r2 \
+#     --from-literal=public-base-url=https://pub-xxxxxxxx.r2.dev
+#
+# Then: kubectl apply -f scripts/k8s-migrate-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: replay-hub-s3-to-r2-migrate
+  namespace: default
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: docker.io/keanuwatts/theclusterflux:replay-hub
+          imagePullPolicy: Always
+          command: ["python", "scripts/migrate_s3_to_r2.py"]
+          env:
+            - name: IS_LOCAL
+              value: "false"
+            - name: USE_R2
+              value: "true"
+            - name: VIDEO_ENCODING_STRATEGY
+              value: "SERVER"
+            - name: R2_ACCOUNT_ID
+              value: "9d6f2289d9d11dc3d803f10c01f4a23d"
+            - name: R2_BUCKET_NAME
+              value: "replay-hub-videos"
+            - name: R2_ENDPOINT
+              value: "https://9d6f2289d9d11dc3d803f10c01f4a23d.r2.cloudflarestorage.com"
+            - name: S3_BUCKET_NAME
+              value: "replay-hub-storage"
+            - name: S3_REGION
+              value: "eu-central-1"
+            - name: AWS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-s3-credentials
+                  key: aws-access-key
+            - name: AWS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-s3-credentials
+                  key: aws-secret-key
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb
+                  key: mongodb-root-password
+            - name: R2_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: r2-credentials
+                  key: access-key-id
+            - name: R2_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: r2-credentials
+                  key: secret-access-key
+            - name: R2_PUBLIC_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: replay-hub-r2
+                  key: public-base-url
+      imagePullSecrets:
+        - name: dockerhub-secret
