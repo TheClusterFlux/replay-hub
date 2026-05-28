@@ -22,7 +22,11 @@ def generate_short_id(length: int = 8) -> str:
 
 
 def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
-    video_id = item.get("_id", "")
+    video_id = str(item.get("_id") or item.get("id") or "")
+    if not video_id:
+        prefix = item.get("storage_prefix", "")
+        if prefix.startswith("videos/"):
+            video_id = prefix.split("videos/", 1)[1]
     stream_urls = build_stream_urls(video_id) if video_id else {}
     manifest = stream_urls.get("hls_manifest_url") or item.get("hls_manifest_url") or item.get("s3_url", "")
     download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url", "")

@@ -36,7 +36,10 @@ def save_to_db(data):
 def fetch_from_db(query):
     """Fetch data from MongoDB."""
     logger.info(f"Fetching data with query: {query}")
-    data = list(collection.find(query, {"_id": 0}))  # Exclude the MongoDB `_id` field
+    data = list(collection.find(query))
+    for doc in data:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
     logger.info(f"Fetched data: {data}")
     return data
 
