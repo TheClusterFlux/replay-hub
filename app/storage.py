@@ -85,6 +85,18 @@ def video_storage_prefix(video_id: str) -> str:
     return f"videos/{video_id}"
 
 
+_historical_prefixes = set(filter(None, os.getenv("R2_HISTORICAL_PREFIXES", "").split(",")))
+_historical_bucket = os.getenv("R2_HISTORICAL_BUCKET", "")
+
+
+def read_location(object_key: str, use_legacy_s3: bool = False):
+    client, bucket = get_storage_client(use_legacy_s3)
+    prefix = "/".join(object_key.strip("/").split("/")[:2])
+    if USE_R2 and not use_legacy_s3 and _historical_bucket and prefix in _historical_prefixes:
+        bucket = _historical_bucket
+    return client, bucket
+
+
 def public_url(object_key: str) -> str:
     key = object_key.lstrip("/")
     if R2_PUBLIC_BASE_URL:
@@ -101,7 +113,7 @@ def build_video_urls(video_id: str) -> Dict[str, str]:
 
 
 def get_object_text(object_key: str, use_legacy_s3: bool = False) -> Optional[str]:
-    client, bucket = get_storage_client(use_legacy_s3)
+    client, bucket = read_location(object_key, use_legacy_s3)
     try:
         response = client.get_object(Bucket=bucket, Key=object_key)
         return response["Body"].read().decode("utf-8")
@@ -203,7 +215,7 @@ def generate_presigned_get(
     object_key: str,
     expires_in: int = PRESIGNED_URL_EXPIRY,
 ) -> Optional[str]:
-    client, bucket = get_storage_client()
+    client, bucket = read_location(object_key)
     try:
         return client.generate_presigned_url(
             "get_object",
@@ -216,7 +228,7 @@ def generate_presigned_get(
 
 
 def object_exists(object_key: str) -> bool:
-    client, bucket = get_storage_client()
+    client, bucket = read_location(object_key)
     try:
         client.head_object(Bucket=bucket, Key=object_key)
         return True
@@ -225,7 +237,7 @@ def object_exists(object_key: str) -> bool:
 
 
 def list_objects(prefix: str = "", use_legacy_s3: bool = False) -> List[str]:
-    client, bucket = get_storage_client(use_legacy_s3)
+    client, bucket = read_location(prefix, use_legacy_s3)
     keys = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -235,7 +247,7 @@ def list_objects(prefix: str = "", use_legacy_s3: bool = False) -> List[str]:
 
 
 def download_object(object_key: str, dest_path: str, use_legacy_s3: bool = False) -> bool:
-    client, bucket = get_storage_client(use_legacy_s3)
+    client, bucket = read_location(object_key, use_legacy_s3)
     try:
         os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
         client.download_file(bucket, object_key, dest_path)

@@ -1,13 +1,13 @@
 from pymongo import MongoClient
 from gridfs import GridFS
 from bson.objectid import ObjectId
-from app.config import MONGO_URI, IS_LOCAL
+from app.config import MONGO_URI, MONGO_DB_NAME, IS_LOCAL
 from app import logger
 
 # Connect to MongoDB
 try:
     client = MongoClient(MONGO_URI)
-    db = client.replay_hub
+    db = client[MONGO_DB_NAME]
     fs = GridFS(db)
     logger.info("Successfully connected to MongoDB")
 except Exception as e:

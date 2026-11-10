@@ -14,6 +14,8 @@ else:
     MONGO_URI = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_SERVICE_NAME}.{MONGO_NAMESPACE}.svc.cluster.local:{MONGO_PORT}"
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
+MONGO_URI = os.getenv("MONGODB_URI") or MONGO_URI
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "replay_hub")
 
 # Video encoding: CLIENT (browser WASM) or SERVER (K8s ffmpeg worker)
 VIDEO_ENCODING_STRATEGY = os.getenv("VIDEO_ENCODING_STRATEGY", "CLIENT").upper()
