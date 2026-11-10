@@ -128,17 +128,6 @@ def increment_view_count(video_id):
         return jsonify({"success": False, "error": str(e)}), 500
     
 
-@app.route('/metadata', methods=['DELETE'])
-def delete_metadata():
-    """Delete metadata from MongoDB with optional filters."""
-    try:
-        filters = request.args.to_dict()
-        deleted_count = delete_from_db(filters)
-        return jsonify({"message": f"Deleted {deleted_count} documents"}), 200
-    except Exception as e:
-        logger.error(f"Error deleting metadata: {e}")
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/upload', methods=['POST'])
 @jwt_required
 def upload_file():
@@ -150,6 +139,14 @@ def upload_file():
         save_to_s3 = True
         step_start = time.time()
         
+        desktop_encode = (os.getenv("ALLOW_DESKTOP_UPLOAD", "false").lower() == "true"
+                          and request.headers.get("X-ReplayHub-Upload-Mode") == "server")
+        if VIDEO_ENCODING_STRATEGY == "CLIENT" and 'url' not in request.form and not desktop_encode:
+            return jsonify({
+                "success": False,
+                "error": "Use browser HLS encoding for this upload.",
+                "encoding_strategy": "CLIENT",
+            }), 400
         if 'url' in request.form:
             file_path, internal_name = process_url_request(request.form['url'])
             file = None  # No file object for URL-based uploads
@@ -161,15 +158,6 @@ def upload_file():
             step_elapsed = time.time() - step_start
             file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
             logger.info(f"📁 File upload processing completed in {step_elapsed:.3f}s ({file_size:.2f}MB)")
-
-        is_url_upload = 'url' in request.form
-
-        if VIDEO_ENCODING_STRATEGY == "CLIENT" and not is_url_upload:
-            return jsonify({
-                "success": False,
-                "error": "Direct upload disabled when VIDEO_ENCODING_STRATEGY=CLIENT. Use browser HLS encoding.",
-                "encoding_strategy": "CLIENT",
-            }), 400
 
         video_metadata = extract_video_metadata(file_path)
         thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
