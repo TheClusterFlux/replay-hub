@@ -30,6 +30,7 @@ def _process_job(job: Dict[str, Any]) -> None:
 
     logger.info("Starting server encoding for video %s", video_id)
 
+    work_dir = None
     try:
         update_db(
             {"_id": video_id},
@@ -83,9 +84,8 @@ def _process_job(job: Dict[str, Any]) -> None:
                 os.remove(input_path)
             except OSError:
                 pass
-        work = job.get("work_dir")
-        if work and os.path.isdir(work):
-            shutil.rmtree(work, ignore_errors=True)
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _worker_loop() -> None:
