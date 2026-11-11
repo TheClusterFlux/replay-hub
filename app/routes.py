@@ -43,7 +43,10 @@ def get_thumbnail(thumbnail_id):
     """Retrieve a thumbnail from GridFS."""
     try:
         thumbnail = fs.get(ObjectId(thumbnail_id))
-        return app.response_class(thumbnail.read(), mimetype='image/jpeg')
+        return app.response_class(thumbnail.read(), mimetype='image/jpeg', headers={
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+            'Cache-Control': 'public, max-age=3600',
+        })
     except Exception as e:
         logger.error(f"Error fetching thumbnail: {e}")
         return jsonify({"error": str(e)}), 500

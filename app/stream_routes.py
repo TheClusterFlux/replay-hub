@@ -5,7 +5,8 @@ import logging
 from flask import Response, redirect, request, jsonify
 
 from app import app
-from app.storage import generate_presigned_get
+from app.storage import generate_presigned_get, read_location
+from botocore.exceptions import BotoCoreError, ClientError
 from app.config import STREAM_PRESIGN_EXPIRY
 from app.streaming import (
     fetch_playlist_text,
@@ -42,10 +43,28 @@ def stream_poster(video_id):
     object_key = resolve_object_key(video_id, "poster.jpg")
     if not object_key:
         return jsonify({"error": "invalid path"}), 400
-    signed = generate_presigned_get(object_key, expires_in=STREAM_PRESIGN_EXPIRY)
-    if not signed:
-        return jsonify({"error": "object not found"}), 404
-    return redirect(signed, 302)
+    try:
+        client, bucket = read_location(object_key)
+        obj = client.get_object(Bucket=bucket, Key=object_key)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("NoSuchKey", "404", "NotFound"):
+            return jsonify({"error": "poster not found"}), 404
+        logger.exception("Failed to read poster for %s", video_id)
+        return jsonify({"error": "poster unavailable"}), 503
+    except BotoCoreError:
+        logger.exception("Poster storage unavailable")
+        return jsonify({"error": "poster unavailable"}), 503
+
+    # Serve the image from the API origin. A second cross-origin redirect
+    # changes the browser's Origin to null, which the private bucket rejects.
+    body = obj["Body"]
+    response = Response(body.iter_chunks(64 * 1024), mimetype="image/jpeg", headers={
+        "Content-Length": str(obj["ContentLength"]),
+        "Cross-Origin-Resource-Policy": "cross-origin",
+        "Cache-Control": "public, max-age=3600",
+    })
+    response.call_on_close(body.close)
+    return response
 
 
 @app.route("/stream/<video_id>/master.m3u8", methods=["GET"])
