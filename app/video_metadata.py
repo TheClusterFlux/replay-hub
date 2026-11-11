@@ -27,11 +27,15 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
         prefix = item.get("storage_prefix", "")
         if prefix.startswith("videos/"):
             video_id = prefix.split("videos/", 1)[1]
-    stream_urls = build_stream_urls(video_id) if video_id else {}
+    is_hls = bool(item.get("storage_prefix") or item.get("encoding_strategy")
+                  or item.get("hls_manifest_url") or not item.get("s3_url"))
+    stream_urls = build_stream_urls(video_id) if video_id and is_hls else {}
     manifest = stream_urls.get("hls_manifest_url") or item.get("hls_manifest_url") or item.get("s3_url", "")
-    download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url", "")
+    download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url") or (manifest if not is_hls else "")
     return {
-        "id": item.get("_id", ""),
+        "id": video_id,
+        "poster_url": stream_urls.get("poster_url") or item.get("poster_url", ""),
+        "uploader_id": item.get("uploader_id") or item.get("user_id"),
         "short_id": item.get("short_id", ""),
         "title": item.get("title", ""),
         "description": item.get("description", ""),
@@ -51,6 +55,7 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
         "players": item.get("players", []),
         "encoding_status": item.get("encoding_status", "ready"),
         "encoding_strategy": item.get("encoding_strategy"),
+        "encoding_error": item.get("encoding_error"),
         "storage_prefix": item.get("storage_prefix", ""),
     }
 

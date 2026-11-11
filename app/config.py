@@ -13,17 +13,17 @@ else:
     MONGO_PASSWORD = os.getenv("MONGO_PASSWORD")
     MONGO_URI = f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_SERVICE_NAME}.{MONGO_NAMESPACE}.svc.cluster.local:{MONGO_PORT}"
 
-UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
 MONGO_URI = os.getenv("MONGODB_URI") or MONGO_URI
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "replay_hub")
+
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
 
 # Video encoding: CLIENT (browser WASM) or SERVER (K8s ffmpeg worker)
 VIDEO_ENCODING_STRATEGY = os.getenv("VIDEO_ENCODING_STRATEGY", "CLIENT").upper()
 if VIDEO_ENCODING_STRATEGY not in ("CLIENT", "SERVER"):
     VIDEO_ENCODING_STRATEGY = "CLIENT"
 
-ENCODING_MAX_CONCURRENT = int(os.getenv("ENCODING_MAX_CONCURRENT", "1"))
-ENCODING_FFMPEG_THREADS = int(os.getenv("ENCODING_FFMPEG_THREADS", "2"))
+ENCODING_FFMPEG_THREADS = max(1, int(os.getenv("ENCODING_FFMPEG_THREADS", "1")))
 HLS_SEGMENT_SECONDS = int(os.getenv("HLS_SEGMENT_SECONDS", "4"))
 PRESIGNED_URL_EXPIRY = int(os.getenv("PRESIGNED_URL_EXPIRY", "3600"))
 
@@ -31,6 +31,7 @@ PRESIGNED_URL_EXPIRY = int(os.getenv("PRESIGNED_URL_EXPIRY", "3600"))
 API_PUBLIC_BASE_URL = os.environ.get(
     "API_PUBLIC_BASE_URL", "https://replay-hub.theclusterflux.com"
 ).rstrip("/")
+PLAYBACK_UI_ORIGIN = os.getenv("PLAYBACK_UI_ORIGIN", "").rstrip("/")
 STREAM_WINDOW_SECONDS = int(os.getenv("STREAM_WINDOW_SECONDS", "300"))
 STREAM_LOOKBEHIND_SECONDS = int(os.getenv("STREAM_LOOKBEHIND_SECONDS", "60"))
 STREAM_PRESIGN_EXPIRY = int(os.getenv("STREAM_PRESIGN_EXPIRY", "900"))

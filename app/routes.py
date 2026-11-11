@@ -1,25 +1,33 @@
 import os
+from werkzeug.utils import secure_filename
+import re
+import json
 import threading
 from flask import request, jsonify, current_app
 from bson.objectid import ObjectId
+from pymongo.errors import DuplicateKeyError
 from app import app, logger
-from app.database import save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document, get_db
-from app.utils import extract_video_metadata, schedule_delete
+from app.database import collection, save_to_db, fetch_from_db, fs, delete_from_db, update_db, get_single_document, get_db
 from app.config import UPLOAD_FOLDER
 from app.storage import upload_file as upload_to_storage
-from app.config import VIDEO_ENCODING_STRATEGY
 from app.storage import build_video_urls, video_storage_prefix
-from app.encoding_queue import enqueue_server_encoding
+from app.encoding_queue import slots, reserve, release, accept_source, check_queue
+from app.encoding_capacity import check_capacity, check_space, SERVER_LIMIT, MAX_CHUNK, MIB, RESERVE as DISK_RESERVE
+from app.upload_cleanup import mark_deleted, clean_session
+from app.url_import import download_url
+import errno
+from werkzeug.exceptions import BadRequest, HTTPException, ServiceUnavailable, RequestEntityTooLarge
 from app.video_metadata import (
     format_video_document,
-    combine_and_save_metadata,
     generate_short_id,
 )
 from app.auth import auth_bp, jwt_required, optional_jwt
 import uuid
-import requests
+from urllib.parse import urlsplit
 import datetime
 import tempfile
+import filecmp
+from pathlib import Path
 import shutil
 import random
 import string
@@ -31,11 +39,18 @@ import time
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-# Configure Flask for large file uploads (10GB max)
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024 * 1024  # 10GB in bytes
+# Allow room for multipart headers as well as the source file.
+app.config['MAX_CONTENT_LENGTH'] = max(MAX_CHUNK, SERVER_LIMIT) + MIB
 
-# Set streaming threshold to handle large files without loading them into memory
-app.config['MAX_CONTENT_LENGTH_FOR_STREAMING'] = 10 * 1024 * 1024  # Use streaming for files larger than 10MB
+@app.before_request
+def protect_upload_memory():
+    if not request.path.startswith("/upload"):
+        return
+    if (request.path != "/upload/chunk" and
+            (request.path != "/upload" or request.mimetype != "multipart/form-data") and
+            (request.content_length or 0) > MIB):
+        raise RequestEntityTooLarge("Upload metadata is too large.")
+    request.max_form_memory_size = MIB
 
 
 @app.route('/thumbnail/<thumbnail_id>', methods=['GET'])
@@ -131,79 +146,78 @@ def increment_view_count(video_id):
         return jsonify({"success": False, "error": str(e)}), 500
     
 
+@app.errorhandler(HTTPException)
+def http_error(error):
+    return jsonify(success=False, error=error.description), error.code
+
+
+@app.route('/upload/server-check', methods=['POST'])
+@jwt_required
+def server_check():
+    data = request.get_json(silent=True) or {}
+    check_capacity(data.get("size") if isinstance(data, dict) else None, app.config["UPLOAD_FOLDER"])
+    check_queue()
+    return jsonify(available=True)
+
+
 @app.route('/upload', methods=['POST'])
 @jwt_required
 def upload_file():
-    """Upload and save a video file."""
-    upload_start_time = time.time()
+    root = app.config["UPLOAD_FOLDER"]
+    length = request.content_length
+    if length is None:
+        raise BadRequest("Provide the file size or use chunked upload.")
+    if length and length > SERVER_LIMIT + MIB:
+        raise RequestEntityTooLarge(f"The server accepts up to {SERVER_LIMIT // MIB} MiB. Trim or compress this video.")
+    check_capacity(min(length or 1, SERVER_LIMIT) if SERVER_LIMIT else 1, root)
+    ticket = reserve(uuid.uuid4().hex, request.current_user_id, length or 0)
+    accepted = False
+    custom_claim = None
     try:
-        logger.info("🚀 Starting file upload process")
-        
-        save_to_s3 = True
-        step_start = time.time()
-        
-        desktop_encode = (os.getenv("ALLOW_DESKTOP_UPLOAD", "false").lower() == "true"
-                          and request.headers.get("X-ReplayHub-Upload-Mode") == "server")
-        if VIDEO_ENCODING_STRATEGY == "CLIENT" and 'url' not in request.form and not desktop_encode:
-            return jsonify({
-                "success": False,
-                "error": "Use browser HLS encoding for this upload.",
-                "encoding_strategy": "CLIENT",
-            }), 400
-        if 'url' in request.form:
-            file_path, internal_name = process_url_request(request.form['url'])
-            file = None  # No file object for URL-based uploads
-            step_elapsed = time.time() - step_start
-            logger.info(f"📥 URL processing completed in {step_elapsed:.3f}s")
-        else:
-            # Validate and process the uploaded file
-            file, file_path, internal_name, save_to_s3 = process_upload_request()
-            step_elapsed = time.time() - step_start
-            file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
-            logger.info(f"📁 File upload processing completed in {step_elapsed:.3f}s ({file_size:.2f}MB)")
+        form = request.form.to_dict()
+        url = form.get("url")
+        file = request.files.get("file")
+        if not url and not file:
+            return jsonify(error="A video file or an approved media URL is required"), 400
+        video_id = form.get("id") or str(uuid.uuid4())
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", video_id):
+            return jsonify(error="Invalid video ID"), 400
+        if form.get("id"):
+            if get_single_document({"_id": video_id}):
+                return jsonify(error="Video ID already exists"), 409
+            try:
+                get_db().hls_uploads.insert_one({"_id": video_id, "mode": "server", "updated": time.time(),
+                                                 "collection": collection.name, "token": ticket["token"]})
+            except DuplicateKeyError:
+                return jsonify(error="Video ID already in use"), 409
+            custom_claim = video_id
+        form["id"] = video_id
+        try:
+            filename = urlsplit(url).path if url else file.filename
+        except ValueError as exc:
+            raise BadRequest("Invalid media URL.") from exc
+        suffix = Path(secure_filename(filename)).suffix.lower() or ".mp4"
+        with tempfile.TemporaryDirectory(prefix="receive-", dir=root) as work:
+            path = Path(work) / ("source" + suffix)
+            if url:
+                # A remote stream may omit or misstate its length.
+                allowance = min(SERVER_LIMIT, max(0, (shutil.disk_usage(root).free - DISK_RESERVE) // 3))
+                download_url(url, path, allowance)
+            else:
+                file.save(path)
+            check_capacity(path.stat().st_size, root)
+            result = accept_source(ticket, path, form)
+            accepted = True
+            return jsonify(result), 202
+    except OSError as error:
+        raise ServiceUnavailable("The server could not stage this video. Check available disk space and retry.") from error
+    finally:
+        if custom_claim:
+            get_db().hls_uploads.delete_one({"_id": custom_claim, "mode": "server", "token": ticket["token"]})
+        if not accepted and not collection.find_one({"encoding_ticket": ticket["token"]}, {"_id": 1}):
+            release(ticket)
 
-        video_metadata = extract_video_metadata(file_path)
-        thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
 
-        form_data = request.form.to_dict()
-        video_id = form_data.get("id") or str(uuid.uuid4())
-        form_data["id"] = video_id
-        urls = build_video_urls(video_id)
-
-        combined_metadata = combine_and_save_metadata(
-            video_metadata,
-            form_data,
-            internal_name,
-            thumbnail_id,
-            urls["s3_url"],
-            extra_fields={
-                **urls,
-                "encoding_status": "pending",
-                "encoding_strategy": "SERVER",
-            },
-        )
-
-        enqueue_server_encoding(
-            video_id,
-            file_path,
-            form_data,
-            internal_name,
-            thumbnail_id=thumbnail_id,
-        )
-
-        total_elapsed = time.time() - upload_start_time
-        logger.info("Server encoding queued for %s in %.3fs", video_id, total_elapsed)
-
-        return jsonify({
-            "success": True,
-            "encoding_status": "pending",
-            "metadata": format_video_document(combined_metadata),
-        }), 202
-    except Exception as e:
-        total_elapsed = time.time() - upload_start_time
-        logger.error(f"❌ Upload failed after {total_elapsed:.3f}s: {e}")
-        return jsonify({"success": False, "error": str(e), "code": 500}), 500
-    
 # Comments API endpoints
 @app.route('/comments/<video_id>', methods=['GET'])
 def get_comments(video_id):
@@ -577,7 +591,15 @@ def add_comment_reaction(comment_id):
         logger.error(f"Error adding comment reaction: {e}")
         return jsonify({"success": False, "error": str(e), "code": 500}), 500
 
+def owns_video(video):
+    owner_id = video.get('uploader_id') or video.get('user_id')
+    if owner_id:
+        return str(owner_id) == request.current_user_id
+    return video.get('uploader') == request.current_user.username
+
+
 @app.route('/thumbnail/<video_id>', methods=['POST'])
+@jwt_required
 def upload_thumbnail(video_id):
     """Upload a custom thumbnail for a video."""
     try:
@@ -588,6 +610,9 @@ def upload_thumbnail(video_id):
         if not video:
             return jsonify({"success": False, "error": "Video not found", "code": 404}), 404
             
+        if not owns_video(video):
+            return jsonify(error="You can only change your own thumbnail"), 403
+
         # Get the actual _id for database operations
         actual_video_id = video.get("_id")
             
@@ -782,30 +807,7 @@ def update_video(video_id):
         if not video:
             return jsonify({"error": "Video not found"}), 404
         
-        # Check if current user is the owner
-        video_uploader_id = video.get('user_id')  # If we store user IDs
-        video_uploader_name = video.get('uploader')  # If we store usernames
-        
-        # Get current user details for comparison using the correct database connection
-        db = get_db()
-        users_collection = db['users']
-        try:
-            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
-        except Exception as e:
-            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
-            return jsonify({"error": "Invalid user ID"}), 400
-        
-        if not current_user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Check ownership
-        is_owner = (
-            video_uploader_id == current_user_id or
-            video_uploader_name == current_user.get('username') or
-            video_uploader_name == current_user.get('display_name')
-        )
-        
-        if not is_owner:
+        if not owns_video(video):
             return jsonify({"error": "You can only edit your own videos"}), 403
         
         # Update allowed fields
@@ -849,30 +851,8 @@ def delete_video(video_id):
         if not video:
             return jsonify({"error": "Video not found"}), 404
         
-        # Check if current user is the owner
-        video_uploader_id = video.get('user_id')
-        video_uploader_name = video.get('uploader')
-        
-        # Get current user details for comparison using the correct database connection
         db = get_db()
-        users_collection = db['users']
-        try:
-            current_user = users_collection.find_one({"_id": ObjectId(current_user_id)})
-        except Exception as e:
-            logger.error(f"Invalid user ID format: {current_user_id}, error: {e}")
-            return jsonify({"error": "Invalid user ID"}), 400
-        
-        if not current_user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Check ownership
-        is_owner = (
-            video_uploader_id == current_user_id or
-            video_uploader_name == current_user.get('username') or
-            video_uploader_name == current_user.get('display_name')
-        )
-        
-        if not is_owner:
+        if not owns_video(video):
             return jsonify({"error": "You can only delete your own videos"}), 403
         
         actual_id = video.get("_id")
@@ -903,14 +883,21 @@ def delete_video(video_id):
             except Exception as e:
                 logger.warning(f"Could not delete thumbnail {thumbnail_id}: {e}")
         
-        # Delete video metadata
-        delete_from_db({"_id": actual_id})
+        # Record cleanup before removing the catalog entry so a crash cannot lose it.
+        managed = video.get("storage_prefix") == video_storage_prefix(actual_id)
+        if managed:
+            mark_deleted(actual_id)
+        query_id = actual_id
+        if ObjectId.is_valid(actual_id) and not collection.find_one({"_id": actual_id}, {"_id": 1}):
+            query_id = ObjectId(actual_id)
+        collection.delete_one({"_id": query_id})
         
-        # TODO: Delete video file from S3 if needed
-        # s3_url = video.get('s3_url')
-        # if s3_url:
-        #     delete_from_s3(s3_url)
-        
+        if managed:
+            try:
+                clean_session(get_db().hls_uploads.find_one({"_id": actual_id}), time.time())
+            except Exception:
+                logger.exception("Media deletion queued for retry")
+
         logger.info(f"User {current_user_id} deleted video {video_id}")
         
         return jsonify({
@@ -1060,85 +1047,6 @@ def delete_reply(reply_id):
         logger.error(f"Error deleting reply: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Keep the existing code for process_upload_request, handle_file_storage, etc.
-
-def process_url_request(url):
-    """Process a video from a URL.
-    
-    :param url: URL of the video to download
-    :return: tuple of (file_path, internal_name)
-    """
-    logger.info(f"Processing video from URL: {url}")
-    
-    # Generate a unique name for the file
-    internal_name = str(uuid.uuid4())
-    file_ext = url.split('.')[-1].split('?')[0] if '.' in url.split('/')[-1] else 'mp4'
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{internal_name}.{file_ext}")
-    
-    # Download the file in chunks to handle large files
-    try:
-        with requests.get(url, stream=True) as response:
-            response.raise_for_status()
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        logger.info(f"Successfully downloaded video from URL to: {file_path}")
-        return file_path, internal_name
-    except Exception as e:
-        logger.error(f"Error downloading video from URL: {e}")
-        raise
-
-def process_upload_request():
-    """Process an uploaded file from a multipart/form-data request.
-    
-    :return: tuple of (file, file_path, internal_name, save_to_s3)
-    """
-    logger.info("Processing file upload request")
-    
-    # Check if the post request has the file part
-    if 'file' not in request.files:
-        logger.error("No file part in the request")
-        raise ValueError("No file part in the request")
-        
-    file = request.files['file']
-    
-    # If user does not select file, browser may submit an empty file without filename
-    if file.filename == '':
-        logger.error("No file selected for uploading")
-        raise ValueError("No file selected for uploading")
-        
-    # Generate a unique name for the file
-    internal_name = str(uuid.uuid4())
-    file_ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'mp4'
-    filename = f"{internal_name}.{file_ext}"
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-    
-    # Check for streaming threshold
-    content_length = request.content_length or 0
-    if content_length > app.config.get('MAX_CONTENT_LENGTH_FOR_STREAMING', 1024 * 1024):
-        logger.info(f"File size exceeds streaming threshold ({content_length} bytes). Using streaming upload.")
-        
-        # Stream the file to disk in chunks
-        try:
-            file.save(file_path)
-            logger.info(f"Successfully saved large file to: {file_path}")
-        except Exception as e:
-            logger.error(f"Error saving large file: {e}")
-            raise
-    else:
-        # For smaller files, use the standard approach
-        try:
-            file.save(file_path)
-            logger.info(f"Successfully saved file to: {file_path}")
-        except Exception as e:
-            logger.error(f"Error saving file: {e}")
-            raise
-            
-    # Determine if we should save to S3
-    save_to_s3 = request.form.get('save_to_s3', 'true').lower() != 'false'
-    
-    return file, file_path, internal_name, save_to_s3
-
 def handle_file_storage(file, file_path, save_to_s3=True):
     """Handle S3 or local storage for an uploaded file.
     
@@ -1212,239 +1120,165 @@ def save_thumbnail_to_gridfs(video_metadata, internal_name):
         logger.error(f"Error saving thumbnail to GridFS: {e}")
         return None
 
+def chunk_directory(file_id):
+    if not file_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", file_id):
+        return None
+    return Path(app.config["UPLOAD_FOLDER"]) / f"chunks_{request.current_user_id}_{file_id}"
+
+
 @app.route('/upload/init', methods=['POST'])
 @jwt_required
 def init_chunked_upload():
-    """Initialize a chunked upload session."""
+    form = request.form
+    file_id = form.get('fileId')
+    directory = chunk_directory(file_id)
+    size = form.get('fileSize', type=int)
+    count = form.get('totalChunks', type=int)
+    if (form.get('action') != 'init_chunked_upload' or not directory or not size or not count
+            or size <= 0 or not 0 < count <= min(size, 100000)):
+        return jsonify(error="Invalid chunked upload parameters"), 400
+    check_capacity(size, app.config["UPLOAD_FOLDER"])
+    destination = directory / "metadata.json"
+    if destination.exists():
+        previous = json.loads(destination.read_text())
+        if not slots.find_one({"token": previous.get("ticket"), "state": "receiving"}):
+            return jsonify(error="This upload has finished or expired. Start a new upload."), 409
+    ticket = reserve(directory.name, request.current_user_id, size)
+    slots.update_one({"token": ticket["token"]}, {"$set": {"local_dir": directory.name, "updated": time.time()}})
+    metadata = form.to_dict()
+    metadata.update(fileSize=size, totalChunks=count, ticket=ticket["token"])
+    directory.mkdir(exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as tmp:
+        json.dump(metadata, tmp)
     try:
-        logger.info("Initializing chunked upload")
-        
-        if 'action' not in request.form or request.form.get('action') != 'init_chunked_upload':
-            logger.error("Invalid action for chunked upload initialization")
-            return jsonify({"success": False, "error": "Invalid action", "code": 400}), 400
-            
-        file_id = request.form.get('fileId')
-        if not file_id:
-            logger.error("No fileId provided for chunked upload")
-            return jsonify({"success": False, "error": "No fileId provided", "code": 400}), 400
-            
-        # Create a temporary directory for this upload
-        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Store basic metadata for this upload
-        metadata = {
-            "fileId": file_id,
-            "filename": request.form.get('filename', ''),
-            "fileSize": request.form.get('fileSize', '0'),
-            "totalChunks": request.form.get('totalChunks', '0'),
-            "chunksReceived": 0,
-            "title": request.form.get('title', ''),
-            "description": request.form.get('description', ''),
-            "uploader": request.form.get('uploader', 'Anonymous'),
-            "players": request.form.get('players', '[]'),
-            "status": "initialized",
-            "created_at": datetime.datetime.now().isoformat()
-        }
-        
-        # Save metadata to a JSON file
-        with open(os.path.join(upload_dir, "metadata.json"), 'w') as f:
-            import json
-            json.dump(metadata, f)
-            
-        logger.info(f"Chunked upload initialized with ID: {file_id}")
-        
-        return jsonify({
-            "success": True,
-            "fileId": file_id,
-            "message": "Chunked upload initialized successfully"
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error initializing chunked upload: {e}")
-        return jsonify({"success": False, "error": str(e), "code": 500}), 500
-        
+        os.link(tmp.name, destination)
+    except FileExistsError:
+        if json.loads(destination.read_text()) != metadata:
+            return jsonify(error="Upload ID already in use"), 409
+    finally:
+        os.unlink(tmp.name)
+    return jsonify(success=True, fileId=file_id), 200
+
+
 @app.route('/upload/chunk', methods=['POST'])
 @jwt_required
 def upload_chunk():
-    """Handle uploading individual chunks of a file."""
+    if request.content_length is None or request.content_length > MAX_CHUNK + MIB:
+        raise RequestEntityTooLarge("A chunk may contain at most 8 MiB.")
+    file_id = request.form.get('fileId')
+    directory = chunk_directory(file_id)
+    if not directory or not (directory / "metadata.json").is_file():
+        return jsonify(error="Upload not initialized"), 400
+    metadata = json.loads((directory / "metadata.json").read_text())
+    index = request.form.get('chunkIndex', type=int)
+    count = metadata['totalChunks']
+    file = request.files.get('file')
+    if (not file or index is None or not 0 <= index < count
+            or request.form.get('totalChunks', type=int) != count):
+        return jsonify(error="Invalid chunk"), 400
+    claim = {"token": metadata.get("ticket"), "state": "receiving"}
+    if not slots.find_one(claim):
+        return jsonify(error="Upload expired or already finished. Start a new upload."), 409
+    check_space(directory, MAX_CHUNK)
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as tmp:
+        path = Path(tmp.name)
     try:
-        logger.info("Processing chunk upload")
-        
-        # Validate request
-        if 'file' not in request.files:
-            logger.error("No file part in chunk upload request")
-            return jsonify({"success": False, "error": "No file part in the request", "code": 400}), 400
-            
-        file = request.files['file']
-        if file.filename == '':
-            logger.error("No file selected for chunk upload")
-            return jsonify({"success": False, "error": "No file selected", "code": 400}), 400
-            
-        file_id = request.form.get('fileId')
-        chunk_index = request.form.get('chunkIndex')
-        total_chunks = request.form.get('totalChunks')
-        
-        if not file_id or not chunk_index or not total_chunks:
-            logger.error("Missing required parameters for chunk upload")
-            return jsonify({"success": False, "error": "Missing required parameters", "code": 400}), 400
-            
-        # Check if the upload was initialized
-        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
-        if not os.path.exists(upload_dir):
-            logger.error(f"Upload directory not found for fileId: {file_id}")
-            return jsonify({"success": False, "error": "Upload not initialized", "code": 400}), 400
-            
-        # Save this chunk to the upload directory
-        chunk_path = os.path.join(upload_dir, f"chunk_{chunk_index}")
-        file.save(chunk_path)
-        
-        # Update metadata
-        import json
-        metadata_path = os.path.join(upload_dir, "metadata.json")
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-            
-        metadata["chunksReceived"] = metadata.get("chunksReceived", 0) + 1
-        
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f)
-            
-        logger.info(f"Chunk {chunk_index} of {total_chunks} saved for file ID {file_id}")
-        
-        return jsonify({
-            "success": True,
-            "fileId": file_id,
-            "chunkIndex": chunk_index,
-            "chunksReceived": metadata["chunksReceived"],
-            "totalChunks": total_chunks
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error uploading chunk: {e}")
-        return jsonify({"success": False, "error": str(e), "code": 500}), 500
-        
+        file.save(path)
+        length = path.stat().st_size
+        if not 0 < length <= min(MAX_CHUNK, metadata['fileSize']):
+            return jsonify(error="Invalid chunk size"), 400
+        part_key = f"parts.{index}"
+        changed = slots.update_one({**claim, part_key: {"$exists": False},
+                                    "$or": [{"received": {"$exists": False}},
+                                            {"received": {"$lte": metadata["fileSize"] - length}}]},
+                                   {"$inc": {"received": length}, "$set": {part_key: length, "updated": time.time()}})
+        if not changed.matched_count and not slots.find_one({**claim, part_key: length}):
+            return jsonify(error="Conflicting chunk or declared size exceeded"), 409
+        target = directory / f"chunk_{index}"
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            if not filecmp.cmp(path, target, shallow=False):
+                return jsonify(error="Chunk already uploaded with different content"), 409
+    finally:
+        path.unlink(missing_ok=True)
+    received = sum(1 for _ in directory.glob("chunk_*"))
+    return jsonify(success=True, fileId=file_id, chunkIndex=index, chunksReceived=received, totalChunks=count)
+
+
 @app.route('/upload/finalize', methods=['POST'])
 @jwt_required
 def finalize_upload():
-    """Finalize a chunked upload by combining all chunks and processing the complete file."""
+    directory = chunk_directory(request.form.get('fileId'))
+    if (request.form.get('action') != 'finalize_chunked_upload' or not directory
+            or not (directory / "metadata.json").is_file()):
+        return jsonify(error="Upload not initialized"), 400
+    receipt = directory / "result.json"
+    if receipt.exists():
+        return jsonify(json.loads(receipt.read_text())), 202
+    metadata = json.loads((directory / "metadata.json").read_text())
+    token = metadata.get("ticket")
+    if token:
+        existing = collection.find_one({"_id": str(uuid.UUID(token)), "encoding_ticket": token})
+        if existing:
+            return jsonify(success=True, encoding_status=existing["encoding_status"],
+                           metadata=format_video_document(existing)), 202
+    # A process-owned lock is released by the OS if the uploader crashes.
+    lock = (directory / "finalizing").open("a+b")
     try:
-        logger.info("Finalizing chunked upload")
-        
-        if 'action' not in request.form or request.form.get('action') != 'finalize_chunked_upload':
-            logger.error("Invalid action for chunked upload finalization")
-            return jsonify({"success": False, "error": "Invalid action", "code": 400}), 400
-            
-        file_id = request.form.get('fileId')
-        if not file_id:
-            logger.error("No fileId provided for chunked upload finalization")
-            return jsonify({"success": False, "error": "No fileId provided", "code": 400}), 400
-            
-        # Check if the upload was initialized
-        upload_dir = os.path.join(app.config["UPLOAD_FOLDER"], f"chunks_{file_id}")
-        if not os.path.exists(upload_dir):
-            logger.error(f"Upload directory not found for fileId: {file_id}")
-            return jsonify({"success": False, "error": "Upload not initialized", "code": 400}), 400
-            
-        # Load metadata
-        import json
-        metadata_path = os.path.join(upload_dir, "metadata.json")
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-            
-        # Check if all chunks have been received
-        chunks_received = metadata.get("chunksReceived", 0)
-        total_chunks = int(metadata.get("totalChunks", "0"))
-        
-        if chunks_received != total_chunks:
-            logger.error(f"Not all chunks received. Got {chunks_received}/{total_chunks}")
-            return jsonify({
-                "success": False,
-                "error": f"Not all chunks received. Got {chunks_received}/{total_chunks}",
-                "code": 400
-            }), 400
-            
-        # Generate a name for the complete file
-        original_filename = request.form.get('filename', metadata.get("filename", ""))
-        file_ext = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else 'mp4'
-        internal_name = str(uuid.uuid4())
-        complete_file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{internal_name}.{file_ext}")
-        
-        # Combine all chunks into the complete file
-        with open(complete_file_path, 'wb') as outfile:
-            for i in range(total_chunks):
-                chunk_path = os.path.join(upload_dir, f"chunk_{i}")
-                
-                if not os.path.exists(chunk_path):
-                    logger.error(f"Chunk {i} not found at {chunk_path}")
-                    return jsonify({"success": False, "error": f"Chunk {i} not found", "code": 400}), 400
-                
-                with open(chunk_path, 'rb') as infile:
-                    outfile.write(infile.read())
-                    
-        logger.info(f"All chunks combined into complete file: {complete_file_path}")
-        
-        # Update metadata status
-        metadata["status"] = "combined"
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f)
-            
-        # Now process the complete file similar to the regular upload endpoint
-        save_to_s3 = True
-        
-        if VIDEO_ENCODING_STRATEGY == "CLIENT":
-            schedule_delete(upload_dir, delay=300)
-            if os.path.exists(complete_file_path):
-                schedule_delete(complete_file_path, delay=300)
-            return jsonify({
-                "success": False,
-                "error": "Chunked upload requires SERVER encoding strategy or use client HLS upload.",
-                "encoding_strategy": "CLIENT",
-            }), 400
+        if os.name == "nt":
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        lock.close()
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        return jsonify(error="Upload is already finalizing. Retry shortly or start a new upload."), 409
 
-        video_metadata = extract_video_metadata(complete_file_path)
-        thumbnail_id = save_thumbnail_to_gridfs(video_metadata, internal_name)
+    source = None
+    try:
+        if receipt.exists():
+            return jsonify(json.loads(receipt.read_text())), 202
+        metadata = json.loads((directory / "metadata.json").read_text())
+        chunks = [directory / f"chunk_{i}" for i in range(metadata["totalChunks"])]
+        if (not all(path.is_file() for path in chunks)
+                or sum(path.stat().st_size for path in chunks) != metadata["fileSize"]):
+            return jsonify(error="Missing chunks or incorrect total size"), 400
 
-        form_data = {
-            "title": request.form.get('title', metadata.get("title", "")),
-            "description": request.form.get('description', metadata.get("description", "")),
-            "uploader": request.form.get('uploader', metadata.get("uploader", "Anonymous")),
-            "players": request.form.get('players', metadata.get("players", "[]")),
-        }
-
-        video_id = str(uuid.uuid4())
+        ticket = slots.find_one({"token": metadata.get("ticket"), "state": "receiving"})
+        if not ticket:
+            return jsonify(error="The upload expired. Start a new upload."), 409
+        check_capacity(metadata["fileSize"], directory)
+        video_id = str(uuid.UUID(ticket["token"]))
+        ext = Path(secure_filename(metadata.get("filename", ""))).suffix or ".mp4"
+        source = directory / ("assembled" + ext)
+        with source.open("wb") as output:
+            for path in chunks:
+                with path.open("rb") as part:
+                    shutil.copyfileobj(part, output)
+        form_data = {key: request.form.get(key, metadata.get(key, ""))
+                     for key in ("title", "description", "uploader", "players")}
         form_data["id"] = video_id
-        urls = build_video_urls(video_id)
-
-        combined_metadata = combine_and_save_metadata(
-            video_metadata,
-            form_data,
-            internal_name,
-            thumbnail_id,
-            urls["s3_url"],
-            extra_fields={
-                **urls,
-                "encoding_status": "pending",
-                "encoding_strategy": "SERVER",
-            },
-        )
-
-        enqueue_server_encoding(
-            video_id,
-            complete_file_path,
-            form_data,
-            internal_name,
-            thumbnail_id=thumbnail_id,
-        )
-
-        schedule_delete(upload_dir, delay=3600)
-
-        return jsonify({
-            "success": True,
-            "encoding_status": "pending",
-            "metadata": format_video_document(combined_metadata),
-        }), 202
-        
-    except Exception as e:
-        logger.error(f"Error finalizing chunked upload: {e}")
-        return jsonify({"success": False, "error": str(e), "code": 500}), 500
+        result = accept_source(ticket, source, form_data)
+        pending = directory / "result.tmp"
+        pending.write_text(json.dumps(result))
+        pending.replace(receipt)
+        for chunk in chunks:
+            chunk.unlink(missing_ok=True)
+        return jsonify(result), 202
+    except OSError as error:
+        raise ServiceUnavailable("The server could not assemble this file. Retry later or choose a smaller clip.") from error
+    except HTTPException as error:
+        if error.code in (400, 413) and source:
+            release(ticket)
+            for chunk in chunks:
+                chunk.unlink(missing_ok=True)
+        raise
+    finally:
+        if source:
+            source.unlink(missing_ok=True)
+        lock.close()

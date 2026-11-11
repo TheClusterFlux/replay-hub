@@ -8,7 +8,8 @@ from typing import Optional, List, Dict
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
+from boto3.exceptions import S3UploadFailedError
 from boto3.s3.transfer import TransferConfig
 
 from app.config import (
@@ -30,9 +31,10 @@ logger = logging.getLogger(__name__)
 MB = 1024 * 1024
 transfer_config = TransferConfig(
     multipart_threshold=64 * MB,
-    max_concurrency=10,
-    multipart_chunksize=64 * MB,
-    use_threads=True,
+    max_concurrency=1,
+    multipart_chunksize=8 * MB,
+    max_io_queue=8,
+    use_threads=False,
 )
 
 VIDEO_TYPES = {
@@ -81,6 +83,12 @@ def get_storage_client(use_legacy_s3: bool = False):
     return _s3_client(), S3_BUCKET_NAME
 
 
+def check_write_storage():
+    from werkzeug.exceptions import ServiceUnavailable
+    if USE_R2 and not (R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY):
+        raise ServiceUnavailable("Server upload storage is unavailable. Retry after storage access is restored.")
+
+
 def video_storage_prefix(video_id: str) -> str:
     return f"videos/{video_id}"
 
@@ -89,12 +97,38 @@ _historical_prefixes = set(filter(None, os.getenv("R2_HISTORICAL_PREFIXES", "").
 _historical_bucket = os.getenv("R2_HISTORICAL_BUCKET", "")
 
 
-def read_location(object_key: str, use_legacy_s3: bool = False):
+def read_location(object_key, use_legacy_s3=False):
     client, bucket = get_storage_client(use_legacy_s3)
     prefix = "/".join(object_key.strip("/").split("/")[:2])
     if USE_R2 and not use_legacy_s3 and _historical_bucket and prefix in _historical_prefixes:
         bucket = _historical_bucket
     return client, bucket
+
+
+def purge_prefix(prefix):
+    """Delete only an exact managed namespace in the active write bucket."""
+    import re
+    if not re.fullmatch(r"(videos/[A-Za-z0-9_-]{1,128}|upload-staging/[a-f0-9]{32})/", prefix):
+        raise ValueError("Invalid upload prefix")
+    check_write_storage()
+    client, bucket = get_storage_client()
+    paginator = client.get_paginator("list_multipart_uploads")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for upload in page.get("Uploads", []):
+            try:
+                client.abort_multipart_upload(Bucket=bucket, Key=upload["Key"], UploadId=upload["UploadId"])
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] != "NoSuchUpload":
+                    raise
+    # Start at the beginning after every deletion. A partial failure is retryable.
+    while True:
+        page = client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1000)
+        objects = [{"Key": entry["Key"]} for entry in page.get("Contents", [])]
+        if not objects:
+            return
+        result = client.delete_objects(Bucket=bucket, Delete={"Objects": objects, "Quiet": True})
+        if result.get("Errors"):
+            raise RuntimeError("Object storage could not remove all upload assets")
 
 
 def public_url(object_key: str) -> str:
@@ -153,7 +187,7 @@ def upload_file(
         url = public_url(object_key)
         logger.info("Upload complete: %s", url)
         return url
-    except ClientError as e:
+    except (ClientError, BotoCoreError, S3UploadFailedError) as e:
         logger.error("Storage upload failed: %s", e)
         return None
 
@@ -185,7 +219,7 @@ def upload_directory(
                     Config=transfer_config,
                 )
                 logger.info("Uploaded %s", object_key)
-            except ClientError as e:
+            except (ClientError, BotoCoreError, S3UploadFailedError) as e:
                 logger.error("Failed to upload %s: %s", object_key, e)
                 ok = False
     return ok
@@ -214,12 +248,16 @@ def generate_presigned_put(
 def generate_presigned_get(
     object_key: str,
     expires_in: int = PRESIGNED_URL_EXPIRY,
+    attachment: bool = False,
 ) -> Optional[str]:
     client, bucket = read_location(object_key)
     try:
+        params = {"Bucket": bucket, "Key": object_key}
+        if attachment:
+            params["ResponseContentDisposition"] = 'attachment; filename="original.mp4"'
         return client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": bucket, "Key": object_key},
+            Params=params,
             ExpiresIn=expires_in,
         )
     except ClientError as e:
@@ -237,7 +275,7 @@ def object_exists(object_key: str) -> bool:
 
 
 def list_objects(prefix: str = "", use_legacy_s3: bool = False) -> List[str]:
-    client, bucket = read_location(prefix, use_legacy_s3)
+    client, bucket = get_storage_client(use_legacy_s3)
     keys = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -247,12 +285,12 @@ def list_objects(prefix: str = "", use_legacy_s3: bool = False) -> List[str]:
 
 
 def download_object(object_key: str, dest_path: str, use_legacy_s3: bool = False) -> bool:
-    client, bucket = read_location(object_key, use_legacy_s3)
+    client, bucket = get_storage_client(use_legacy_s3)
     try:
         os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-        client.download_file(bucket, object_key, dest_path)
+        client.download_file(bucket, object_key, dest_path, Config=transfer_config)
         return True
-    except ClientError as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error("Download failed %s: %s", object_key, e)
         return False
 

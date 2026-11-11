@@ -1,5 +1,15 @@
 # Replay Hub
 
+## Uploads on small servers
+
+The browser tries local encoding for files up to 64 MiB and lowers that limit on low-memory devices. Larger files and browser encoder failures go through an authenticated capacity check before the browser sends the video. The default server accepts up to 512 MiB, 1080p, 60 fps and 30 minutes. It keeps 512 MiB of scratch space in reserve, limits output to 720p, and runs one FFmpeg job with one encoding thread. Two slots cover uploads in progress, queued jobs and the active encode. The limits are configurable in `.env.example`.
+
+The API records accepted jobs in MongoDB and stages originals under `upload-staging/` in the configured private write bucket. Run `python main.py` to start the API and recovery worker together. A replacement worker reclaims an interrupted job after its 90-second lease expires. Pre-upgrade jobs can recover if their local original survives. An interrupted browser transfer must be sent again.
+
+URL imports accept exact HTTPS hosts listed in `URL_IMPORT_HOSTS`. Each redirect needs an approved host and public DNS addresses. An empty setting disables imports.
+
+The worker reclaims idle incoming uploads after 30 minutes and abandoned browser bundles after at least 24 hours and signed URL expiry. Deletion also schedules a second pass for late writes. For old untracked video prefixes, run `python -m app.upload_cleanup --bucket BUCKET` against a bucket dedicated to this catalog. Inspect the preview, then add `--apply` to remove eligible objects. The storage identity needs object read, write, list and delete access plus multipart list and abort permissions.
+
 Replay Hub is a Flask-based API service designed to interact with a MongoDB database. It provides endpoints to save and fetch data, making it suitable for applications requiring persistent storage and retrieval of structured data.
 
 ## Key Features

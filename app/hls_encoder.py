@@ -7,6 +7,7 @@ import logging
 import subprocess
 from typing import Callable, Dict, Optional
 
+from app.encoding_capacity import INPUT_OPTIONS, MAX_HEIGHT
 from app.config import HLS_SEGMENT_SECONDS, ENCODING_FFMPEG_THREADS
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ def check_ffmpeg_available() -> bool:
 
 def _run_ffmpeg(cmd: list, timeout: int = 7200) -> None:
     logger.info("ffmpeg: %s", " ".join(cmd))
+    cmd[1:1] = ["-nostdin", "-v", "error"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(result.stderr or "ffmpeg failed")
@@ -45,6 +47,7 @@ def _probe_height(input_path: str) -> int:
         "quiet",
         "-print_format",
         "json",
+        *INPUT_OPTIONS,
         "-show_streams",
         input_path,
     ]
@@ -87,7 +90,7 @@ def encode_to_hls(
     os.makedirs(output_dir, exist_ok=True)
 
     source_height = _probe_height(input_path)
-    applicable = [r for r in BITRATE_LADDER if r[1] <= source_height]
+    applicable = [r for r in BITRATE_LADDER if r[1] <= min(source_height, MAX_HEIGHT)]
     if not applicable:
         applicable = [BITRATE_LADDER[0]]
 
@@ -107,12 +110,15 @@ def encode_to_hls(
         cmd = [
             "ffmpeg",
             "-y",
+            *INPUT_OPTIONS, "-threads", threads, "-filter_threads", "1",
             "-i",
             input_path,
             "-vf",
-            f"scale=-2:{height}",
+            f"scale=-2:min({height}\\,max(2\\,trunc(ih/2)*2))",
             "-c:v",
             "libx264",
+            "-pix_fmt", "yuv420p",
+            "-force_key_frames", f"expr:gte(t,n_forced*{HLS_SEGMENT_SECONDS})",
             "-preset",
             "fast",
             "-threads",
@@ -151,8 +157,7 @@ def encode_to_hls(
         [
             "ffmpeg",
             "-y",
-            "-ss",
-            "1",
+            *INPUT_OPTIONS, "-threads", threads, "-filter_threads", "1",
             "-i",
             input_path,
             "-vframes",
@@ -168,7 +173,16 @@ def encode_to_hls(
         on_progress("Preserving original MP4", len(applicable) + 2, total)
 
     original_path = os.path.join(output_dir, "original.mp4")
-    shutil.copy2(input_path, original_path)
+    if os.path.splitext(input_path)[1].lower() == ".mp4":
+        shutil.copy2(input_path, original_path)
+    else:
+        try:
+            _run_ffmpeg(["ffmpeg", "-y", *INPUT_OPTIONS, "-threads", threads, "-filter_threads", "1", "-i", input_path, "-map", "0:v:0", "-map", "0:a?",
+                         "-c", "copy", "-movflags", "+faststart", original_path])
+        except RuntimeError:
+            _run_ffmpeg(["ffmpeg", "-y", *INPUT_OPTIONS, "-threads", threads, "-filter_threads", "1", "-i", input_path, "-map", "0:v:0", "-map", "0:a?",
+                         "-c:v", "libx264", "-threads", threads, "-pix_fmt", "yuv420p",
+                         "-c:a", "aac", "-movflags", "+faststart", original_path])
 
     master_path = _write_master_playlist(output_dir, variants_for_master)
 

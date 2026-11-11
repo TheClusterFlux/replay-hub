@@ -1,3 +1,4 @@
+import secrets
 import logging
 import os
 from flask import Flask
@@ -16,7 +17,11 @@ CORS(app,
      supports_credentials=True)
 
 # Configure app
-app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'your-super-secret-jwt-key-change-this-in-production')
+jwt_secret = os.environ.get('JWT_SECRET_KEY')
+if not jwt_secret or jwt_secret in {'change-me', 'your-super-secret-jwt-key-change-this-in-production'}:
+    logging.getLogger(__name__).warning("Set JWT_SECRET_KEY to keep sessions valid across workers and restarts")
+    jwt_secret = secrets.token_hex(32)
+app.config['JWT_SECRET_KEY'] = jwt_secret
 app.config['JWT_EXPIRATION_HOURS'] = int(os.environ.get('JWT_EXPIRATION_HOURS', '24'))
 
 # Configure logging
@@ -56,5 +61,12 @@ def handle_preflight():
 from app import routes  # noqa: F401
 from app import hls_routes  # noqa: F401
 from app import stream_routes  # noqa: F401
+
+@app.before_request
+def start_wsgi_worker():
+    if not app.testing:
+        from app.encoding_queue import start_workers
+        start_workers()
+
 
 logger.info("Flask app initialized successfully")
