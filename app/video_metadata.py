@@ -32,10 +32,11 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
     stream_urls = build_stream_urls(video_id) if video_id and is_hls else {}
     manifest = stream_urls.get("hls_manifest_url") or item.get("hls_manifest_url") or item.get("s3_url", "")
     download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url") or (manifest if not is_hls else "")
+    uploader_id = item.get("uploader_id") or item.get("user_id")
     return {
         "id": video_id,
         "poster_url": stream_urls.get("poster_url") or item.get("poster_url", ""),
-        "uploader_id": item.get("uploader_id") or item.get("user_id"),
+        "uploader_id": str(uploader_id) if uploader_id is not None else None,
         "short_id": item.get("short_id", ""),
         "title": item.get("title", ""),
         "description": item.get("description", ""),

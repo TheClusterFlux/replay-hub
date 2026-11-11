@@ -74,6 +74,13 @@ class UploadPlaybackTests(unittest.TestCase):
             self.assertEqual(response.headers["Cache-Control"], "no-store")
             self.assertEqual(sign.call_args.args[0], "videos/replay/720p/seg_00001.ts")
 
+    def test_migrated_uploader_id_is_json_serializable(self):
+        from bson import ObjectId
+        owner = ObjectId()
+        doc = format_video_document({"_id": "replay", "user_id": owner})
+        self.assertEqual(doc["uploader_id"], str(owner))
+        app.json.dumps(doc)
+
     def test_legacy_direct_video_keeps_its_original_url(self):
         url = "https://storage.test/old-clip.mp4"
         doc = format_video_document({"_id": "legacy", "s3_url": url})
