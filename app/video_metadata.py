@@ -7,11 +7,12 @@ import string
 import datetime
 import logging
 from typing import Any, Dict, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from flask import request
 
 from app.database import get_single_document, save_to_db
+from app.config import API_PUBLIC_BASE_URL
 from app.streaming import build_stream_urls
 
 logger = logging.getLogger(__name__)
@@ -62,12 +63,19 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
     is_hls = bool(item.get("storage_prefix") or item.get("encoding_strategy")
                   or item.get("hls_manifest_url") or not item.get("s3_url"))
     stream_urls = build_stream_urls(video_id) if video_id and is_hls else {}
+    gallery_base = API_PUBLIC_BASE_URL.rstrip("/") + "/gallery"
+    gallery_images = []
+    if item.get("thumbnail_id"):
+        gallery_images.append(f"{gallery_base}/thumbnail/{quote(str(item['thumbnail_id']), safe='')}.webp")
+    if stream_urls:
+        gallery_images.append(f"{gallery_base}/poster/{quote(video_id, safe='')}.webp")
     media_url, media_type = inline_media(item, stream_urls)
     manifest = stream_urls.get("hls_manifest_url") or item.get("hls_manifest_url") or item.get("s3_url", "")
     download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url") or (manifest if not is_hls else "")
     uploader_id = item.get("uploader_id") or item.get("user_id")
     return {
         "id": video_id,
+        "gallery_image_urls": gallery_images,
         "poster_url": stream_urls.get("poster_url") or item.get("poster_url", ""),
         "uploader_id": str(uploader_id) if uploader_id is not None else None,
         "short_id": item.get("short_id", ""),

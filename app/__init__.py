@@ -61,6 +61,7 @@ def handle_preflight():
 from app import routes  # noqa: F401
 from app import hls_routes  # noqa: F401
 from app import stream_routes  # noqa: F401
+from app import gallery_images  # noqa: F401
 from app import share_routes  # noqa: F401
 
 @app.before_request
