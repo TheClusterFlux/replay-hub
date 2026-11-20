@@ -1,5 +1,13 @@
 # Replay Hub
 
+## Sharing replays in chat
+
+Release the API first, then the UI with its bundled Nginx configuration. Share a replay with the **Share** button or copy its `/video.html?id=…` address. The API renders the title, thumbnail and playable media link in the first HTML response. Opening the link in a browser loads the regular player.
+
+Set `API_PUBLIC_BASE_URL` and `PLAYBACK_UI_ORIGIN` to the public HTTPS origins of the API and UI. If you use a different API hostname, also update the `/share` redirect in the UI's `nginx.conf`. The storage bucket can stay private. Each media request gets a fresh, short-lived storage URL.
+
+Discord can play compatible videos inline when embeds are enabled. Managed replays use their original MP4, so playback depends on the codecs in that file. WhatsApp normally shows a title and thumbnail for website links. To play a replay inside a WhatsApp conversation, choose **Download Original** and attach the file as a video.
+
 ## Uploads on small servers
 
 The browser tries local encoding for files up to 64 MiB and lowers that limit on low-memory devices. Larger files and browser encoder failures go through an authenticated capacity check before the browser sends the video. The default server accepts up to 512 MiB, 1080p, 60 fps and 30 minutes. It keeps 512 MiB of scratch space in reserve, limits output to 720p, and runs one FFmpeg job with one encoding thread. Two slots cover uploads in progress, queued jobs and the active encode. The limits are configurable in `.env.example`.

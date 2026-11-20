@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ title }} · Replay Hub</title>
+  <link rel="canonical" href="{{ canonical }}">
+  <meta property="og:site_name" content="Replay Hub">
+  <meta property="og:type" content="{{ 'video.other' if media else 'website' }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  <meta property="og:image" content="{{ poster }}">
+  <meta property="og:image:alt" content="{{ title }}">
+  {% if media %}
+  <meta property="og:video" content="{{ media }}">
+  {% if media.startswith('https://') %}
+  <meta property="og:video:secure_url" content="{{ media }}">
+  {% endif %}
+  <meta property="og:video:type" content="{{ media_type }}">
+  <meta property="og:video:width" content="{{ width }}">
+  <meta property="og:video:height" content="{{ height }}">
+  {% endif %}
+</head>
+<body>
+  <a id="watch" href="{{ watch_url }}">Watch {{ title }} on Replay Hub</a>
+  <script>location.replace(document.getElementById('watch').href);</script>
+</body>
+</html>

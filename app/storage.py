@@ -249,6 +249,7 @@ def generate_presigned_get(
     object_key: str,
     expires_in: int = PRESIGNED_URL_EXPIRY,
     attachment: bool = False,
+    http_method: str = "GET",
 ) -> Optional[str]:
     client, bucket = read_location(object_key)
     try:
@@ -256,7 +257,7 @@ def generate_presigned_get(
         if attachment:
             params["ResponseContentDisposition"] = 'attachment; filename="original.mp4"'
         return client.generate_presigned_url(
-            "get_object",
+            "head_object" if http_method == "HEAD" else "get_object",
             Params=params,
             ExpiresIn=expires_in,
         )

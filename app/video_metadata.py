@@ -7,10 +7,11 @@ import string
 import datetime
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from flask import request
 
-from app.database import save_to_db
+from app.database import get_single_document, save_to_db
 from app.streaming import build_stream_urls
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,37 @@ logger = logging.getLogger(__name__)
 def generate_short_id(length: int = 8) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(random.choices(chars, k=length))
+
+
+def find_video(video_id: str):
+    return get_single_document({"_id": video_id}) or get_single_document({"short_id": video_id})
+
+
+def inline_media(item, stream_urls):
+    if item.get("encoding_status", "ready") != "ready":
+        return "", ""
+    if stream_urls and (item.get("storage_prefix") or item.get("encoding_strategy")
+                        or item.get("hls_manifest_url") == stream_urls["hls_manifest_url"]):
+        return stream_urls["inline_mp4_url"], "video/mp4"
+    # Historical entries may have only a direct URL. A playlist is unusable
+    # as a progressive video, even when the watch page can play it through HLS.
+    for url in (item.get("s3_url"), item.get("download_mp4_url")):
+        if not isinstance(url, str):
+            continue
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            continue
+        if parts.scheme not in ("https", "http") or not parts.netloc:
+            continue
+        path = parts.path.lower()
+        if path.endswith((".mp4", ".m4v")):
+            return url, "video/mp4"
+        if path.endswith(".webm"):
+            return url, "video/webm"
+        if path.endswith(".mov"):
+            return url, "video/quicktime"
+    return "", ""
 
 
 def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -30,6 +62,7 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
     is_hls = bool(item.get("storage_prefix") or item.get("encoding_strategy")
                   or item.get("hls_manifest_url") or not item.get("s3_url"))
     stream_urls = build_stream_urls(video_id) if video_id and is_hls else {}
+    media_url, media_type = inline_media(item, stream_urls)
     manifest = stream_urls.get("hls_manifest_url") or item.get("hls_manifest_url") or item.get("s3_url", "")
     download = stream_urls.get("download_mp4_url") or item.get("download_mp4_url") or (manifest if not is_hls else "")
     uploader_id = item.get("uploader_id") or item.get("user_id")
@@ -43,6 +76,8 @@ def format_video_document(item: Dict[str, Any]) -> Dict[str, Any]:
         "s3_url": manifest,
         "hls_manifest_url": manifest,
         "download_mp4_url": download,
+        "inline_video_url": media_url,
+        "inline_video_type": media_type,
         "thumbnail_id": item.get("thumbnail_id", ""),
         "duration": item.get("duration", 0),
         "resolution": item.get("resolution", ""),

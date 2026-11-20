@@ -17,6 +17,22 @@ from app.streaming import (
 logger = logging.getLogger(__name__)
 
 
+@app.route("/stream/<video_id>/original.mp4", methods=["GET"])
+def stream_inline_mp4(video_id):
+    object_key = resolve_object_key(video_id, "original.mp4")
+    if not object_key:
+        return jsonify({"error": "invalid path"}), 400
+    # A HEAD probe needs its own signature. The bucket serves byte ranges
+    # directly, so large replays do not occupy an API worker during playback.
+    signed = generate_presigned_get(object_key, expires_in=STREAM_PRESIGN_EXPIRY,
+                                    http_method=request.method)
+    if not signed:
+        return jsonify({"error": "video unavailable"}), 503
+    response = redirect(signed, 307)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/stream/<video_id>/download", methods=["GET"])
 def stream_download(video_id):
     object_key = resolve_object_key(video_id, "original.mp4")

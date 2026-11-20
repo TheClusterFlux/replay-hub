@@ -18,6 +18,7 @@ from app.url_import import download_url
 import errno
 from werkzeug.exceptions import BadRequest, HTTPException, ServiceUnavailable, RequestEntityTooLarge
 from app.video_metadata import (
+    find_video,
     format_video_document,
     generate_short_id,
 )
@@ -100,11 +101,7 @@ def get_metadata():
 def get_video_metadata(video_id):
     """Retrieve metadata for a specific video by _id, short_id, or legacy UUID."""
     try:
-        # Try to find by _id first
-        video = get_single_document({"_id": video_id})
-        if not video:
-            # Try to find by short_id
-            video = get_single_document({"short_id": video_id})
+        video = find_video(video_id)
         if not video:
             return jsonify({"error": "Video not found"}), 404
         # Format the response to match API specs

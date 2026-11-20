@@ -24,6 +24,7 @@ def build_stream_urls(video_id: str) -> Dict[str, str]:
         "storage_prefix": prefix,
         "hls_manifest_url": f"{base}/stream/{quote(video_id, safe='')}/master.m3u8",
         "download_mp4_url": f"{base}/stream/{quote(video_id, safe='')}/download",
+        "inline_mp4_url": f"{base}/stream/{quote(video_id, safe='')}/original.mp4",
         "s3_url": f"{base}/stream/{quote(video_id, safe='')}/master.m3u8",
         "poster_url": f"{base}/stream/{quote(video_id, safe='')}/poster.jpg",
     }
