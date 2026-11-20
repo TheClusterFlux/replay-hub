@@ -2,7 +2,7 @@
 
 import logging
 
-from flask import Response, redirect, jsonify, request
+from flask import Response, redirect, jsonify, request, url_for
 
 from app import app
 from app.storage import generate_presigned_get, read_location
@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 
 @app.route("/stream/<video_id>/original.mp4", methods=["GET"])
 def stream_inline_mp4(video_id):
+    # Cloudflare may fetch a cacheable .mp4 path with GET for a client's
+    # first HEAD probe. Both methods must get the same redirect at this hop.
+    response = redirect(url_for("sign_inline_video", video_id=video_id), 307)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/stream/<video_id>/inline", methods=["GET"])
+def sign_inline_video(video_id):
     object_key = resolve_object_key(video_id, "original.mp4")
     if not object_key:
         return jsonify({"error": "invalid path"}), 400

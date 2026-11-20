@@ -77,6 +77,10 @@ class ShareTests(unittest.TestCase):
             for method, operation in (("GET", "get_object"), ("HEAD", "head_object")):
                 response = self.client.open("/stream/stored-id/original.mp4", method=method,
                                             headers={"Range": "bytes=0-1"})
+                self.assertEqual(response.location, "/stream/stored-id/inline")
+                self.assertEqual(response.status_code, 307)
+                response = self.client.open(response.location, method=method,
+                                            headers={"Range": "bytes=0-1"})
                 self.assertEqual(response.status_code, 307)
                 self.assertEqual(response.location, "https://storage.test/signed")
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
